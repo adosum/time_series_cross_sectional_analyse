@@ -180,15 +180,16 @@ df2['target'] = (df2['close30'] - df2['close']) / df2['close']
 # print(df_nan)
 # assert df_nan.sum() == 0
 
-# change date column from str to datetime type
-df2['date'] = pd.to_datetime(df2['date'], format='%Y-%m-%d')
-df2 = df2[df2.date >= pd.to_datetime('2017-01-01', format='%Y-%m-%d')].reset_index(drop=True)
-df2 = df2[df2.date <= df2.groupby(by=['index_code']).date.max().min()].reset_index(drop=True)
-
 # drop index_code == cac40, dax, japan225
 df2 = df2[df2.index_code != 'cac40'].reset_index(drop=True)
 df2 = df2[df2.index_code != 'dax'].reset_index(drop=True)
 df2 = df2[df2.index_code != 'nikkei225'].reset_index(drop=True)
+df2 = df2[df2.index_code != 'Au99'].reset_index(drop=True)
+
+# change date column from str to datetime type
+df2['date'] = pd.to_datetime(df2['date'], format='%Y-%m-%d')
+df2 = df2[df2.date >= pd.to_datetime('2017-01-01', format='%Y-%m-%d')].reset_index(drop=True)
+df2 = df2[df2.date <= df2.groupby(by=['index_code']).date.max().min()].reset_index(drop=True)
 
 # only keep those dates which all index codes have
 date_list = df2.groupby(by=['date']).index_code.count()
