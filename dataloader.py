@@ -44,7 +44,6 @@ class MyDataset(Dataset):
         r_begin = self.df_dates[idx + self.seq_len - self.label_len]
         r_end = self.df_dates[idx + self.seq_len + self.pred_len]
 
-
         features = self.data[self.data.date.apply(
             lambda x: (x >= start_time) & (x < end_time))].reset_index(drop=True)
         target = self.data[self.data.date.apply(

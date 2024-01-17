@@ -5,6 +5,7 @@ import datetime
 import akshare as ak
 import yfinance
 from utils import *
+from mytt.MyTT import EMA, SMA
 
 pd.options.mode.copy_on_write = True
 
@@ -125,13 +126,13 @@ else:
     overnight_rate_df['date'] = overnight_rate_df['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
     overnight_rate_df.drop(['Dividends', 'Stock Splits', 'Volume', 'Capital Gains', 'Date'], axis=1, inplace=True)
     overnight_rate_df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
-                                        'Close': 'close'}, inplace=True)
+                                      'Close': 'close'}, inplace=True)
     bond_20y_df = yfinance.Ticker("TLT").history(start="2015-01-01", end=today, interval="1d")
     bond_20y_df = bond_20y_df.reset_index()
     bond_20y_df['date'] = bond_20y_df['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
     bond_20y_df.drop(['Dividends', 'Stock Splits', 'Volume', 'Capital Gains', 'Date'], axis=1, inplace=True)
     bond_20y_df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
-                                    'Close': 'close'}, inplace=True)
+                                'Close': 'close'}, inplace=True)
     overnight_rate_df.to_csv(os.path.join(data_path, 'overnight_rate.csv'), index=False)
     bond_20y_df.to_csv(os.path.join(data_path, '20y_bond.csv'), index=False)
 # calculate technical indicators
@@ -147,6 +148,10 @@ df["psy"] = (df.groupby(['index_code']).close.apply(lambda x: psy(x))
              .reset_index(drop=True))
 df["bias"] = (df.groupby(['index_code']).close.apply(lambda x: bias(x))
               .reset_index(drop=True))
+df["sma"] = (df.groupby(['index_code']).close.apply(lambda x: SMA(x, 30))
+             .reset_index(drop=True))
+df["ema"] = (df.groupby(['index_code']).close.apply(lambda x: EMA(x, 30))
+             .reset_index(drop=True))
 # remove duplicated rows
 df = df[~df[['index_code', 'date']].duplicated()].reset_index(drop=True)
 df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -165,8 +170,8 @@ df2['dif'] = df2.groupby(['index_code']).dif.bfill()
 df2['rsi'] = df2.groupby(['index_code']).rsi.bfill()
 df2['psy'] = df2.groupby(['index_code']).psy.bfill()
 df2['bias'] = df2.groupby(['index_code']).bias.bfill()
-
-# TODO: add sma and ema
+df2['sma'] = df2.groupby(['index_code']).sma.bfill()
+df2['ema'] = df2.groupby(['index_code']).ema.bfill()
 
 # calculate pct_change
 df2['pre_close'] = df2.groupby('index_code')['close'].shift(1)
@@ -277,7 +282,7 @@ df2 = pd.merge(df2, macro_china_cpi_monthly_df, how='left', left_on='date', righ
 df2['cpi_cn'] = df2['cpi_cn'].ffill()
 df2['cpi_cn'] = df2['cpi_cn'].bfill()
 macro_usa_cpi_monthly_se['index'] = pd.to_datetime(macro_usa_cpi_monthly_se['index'],
-                                                    format='%Y-%m-%d')
+                                                   format='%Y-%m-%d')
 macro_usa_cpi_monthly_se.rename(columns={'index': 'date', 'cpi_monthly': 'cpi_us'}, inplace=True)
 df2 = pd.merge(df2, macro_usa_cpi_monthly_se, how='left', left_on='date', right_on='date')
 df2['cpi_us'] = df2['cpi_us'].ffill()
@@ -292,7 +297,7 @@ df2['ppi_cn'] = df2['ppi_cn'].bfill()
 # merge overnight rate, 20+ year bond rate
 overnight_rate_df['date'] = pd.to_datetime(overnight_rate_df['date'], format='%Y-%m-%d')
 overnight_rate_df.rename(columns={'open': 'open_overnight_rate', 'high': 'high_overnight_rate',
-                                    'low': 'low_overnight_rate', 'close': 'close_overnight_rate'}, inplace=True)
+                                  'low': 'low_overnight_rate', 'close': 'close_overnight_rate'}, inplace=True)
 df2 = pd.merge(df2, overnight_rate_df, how='left', left_on='date', right_on='date')
 df2['open_overnight_rate'] = df2['open_overnight_rate'].ffill()
 df2['high_overnight_rate'] = df2['high_overnight_rate'].ffill()
@@ -300,12 +305,18 @@ df2['low_overnight_rate'] = df2['low_overnight_rate'].ffill()
 df2['close_overnight_rate'] = df2['close_overnight_rate'].ffill()
 bond_20y_df['date'] = pd.to_datetime(bond_20y_df['date'], format='%Y-%m-%d')
 bond_20y_df.rename(columns={'open': 'open_20y_bond', 'high': 'high_20y_bond',
-                                'low': 'low_20y_bond', 'close': 'close_20y_bond'}, inplace=True)
+                            'low': 'low_20y_bond', 'close': 'close_20y_bond'}, inplace=True)
 df2 = pd.merge(df2, bond_20y_df, how='left', left_on='date', right_on='date')
 df2['open_20y_bond'] = df2['open_20y_bond'].ffill()
 df2['high_20y_bond'] = df2['high_20y_bond'].ffill()
 df2['low_20y_bond'] = df2['low_20y_bond'].ffill()
 df2['close_20y_bond'] = df2['close_20y_bond'].ffill()
+
+# index_code to numeric according to map table
+df2['index_code'] = df2['index_code'].map({'sh000016': 0, 'sh000300': 1, 'sh000905': 2,
+                                           'sz399006': 3, 'sp500': 4, 'dowjones': 5,
+                                           'nasdaq': 6, 'dax': 7, 'cac40': 8,
+                                           'nikkei225': 9, 'Au99': 10})
 
 df_nan = df2.isnull().any()
 assert df_nan.sum() == 0

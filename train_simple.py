@@ -50,7 +50,7 @@ f_x = ['close', 'open', 'high', 'low',
        '涨跌_Chibor', 'open_vix_us', 'high_vix_us', 'low_vix_us', 'close_vix_us',
        'open_vix_cn', 'high_vix_cn', 'low_vix_cn', 'close_vix_cn', 'cpi_cn',
        'cpi_us', 'ppi_cn', 'open_overnight_rate', 'high_overnight_rate', 'low_overnight_rate', 'close_overnight_rate',
-       'open_20y_bond', 'high_20y_bond', 'low_20y_bond', 'close_20y_bond']
+       'open_20y_bond', 'high_20y_bond', 'low_20y_bond', 'close_20y_bond', 'index_code']
 df['volume'] = df['volume'].apply(lambda x: np.log(x))
 
 dfa = pd.DataFrame()
