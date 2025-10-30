@@ -2,7 +2,7 @@
 # 此版本针对python2的老版本pandas使用   2021-10-22日更新
 
 
-import numpy as np;
+import numpy as np
 import pandas as pd
 
 
@@ -71,9 +71,9 @@ def AVEDEV(S, N):  # 平均绝对偏差  (序列与其平均值的绝对差的�
 
 
 def SLOPE(S, N, RS=False):  # 返S序列N周期回线性回归斜率 (默认只返回斜率,不返回整个直线序列)
-    M = pd.Series(S[-N:]);
-    poly = np.polyfit(M.index, M.values, deg=1);
-    Y = np.polyval(poly, M.index);
+    M = pd.Series(S[-N:])
+    poly = np.polyfit(M.index, M.values, deg=1)
+    Y = np.polyval(poly, M.index)
     if RS: return Y[1] - Y[0], Y
     return Y[1] - Y[0]
 
@@ -110,16 +110,16 @@ def CROSS(S1, S2):  # 判断向上金叉穿越 CROSS(MA(C,5),MA(C,10))     判�
 
 # ------------------   2级：技术指标函数(全部通过0级，1级函数实现） ------------------------------
 def MACD(CLOSE, SHORT=12, LONG=26, M=9):  # EMA的关系，S取120日，和雪球小数点2位相同
-    DIF = EMA(CLOSE, SHORT) - EMA(CLOSE, LONG);
-    DEA = EMA(DIF, M);
+    DIF = EMA(CLOSE, SHORT) - EMA(CLOSE, LONG)
+    DEA = EMA(DIF, M)
     MACD = (DIF - DEA) * 2
     return RD(DIF), RD(DEA), RD(MACD)
 
 
 def KDJ(CLOSE, HIGH, LOW, N=9, M1=3, M2=3):  # KDJ指标
     RSV = (CLOSE - LLV(LOW, N)) / (HHV(HIGH, N) - LLV(LOW, N)) * 100
-    K = EMA(RSV, (M1 * 2 - 1));
-    D = EMA(K, (M2 * 2 - 1));
+    K = EMA(RSV, (M1 * 2 - 1))
+    D = EMA(K, (M2 * 2 - 1))
     J = K * 3 - D * 2
     return K, D, J
 
@@ -143,7 +143,7 @@ def BIAS(CLOSE, L1=6, L2=12, L3=24):  # BIAS乖离率
 
 
 def BOLL(CLOSE, N=20, P=2):  # BOLL指标，布林带
-    MID = MA(CLOSE, N);
+    MID = MA(CLOSE, N)
     UPPER = MID + STD(CLOSE, N) * P
     LOWER = MID - STD(CLOSE, N) * P
     return RD(UPPER), RD(MID), RD(LOWER)
@@ -171,11 +171,11 @@ def BBI(CLOSE, M1=3, M2=6, M3=12, M4=20):  # BBI多空指标
 
 def DMI(CLOSE, HIGH, LOW, M1=14, M2=6):  # 动向指标：结果和同花顺，通达信完全一致
     TR = SUM(MAX(MAX(HIGH - LOW, ABS(HIGH - REF(CLOSE, 1))), ABS(LOW - REF(CLOSE, 1))), M1)
-    HD = HIGH - REF(HIGH, 1);
+    HD = HIGH - REF(HIGH, 1)
     LD = REF(LOW, 1) - LOW
     DMP = SUM(IF((HD > 0) & (HD > LD), HD, 0), M1)
     DMM = SUM(IF((LD > 0) & (LD > HD), LD, 0), M1)
-    PDI = DMP * 100 / TR;
+    PDI = DMP * 100 / TR
     MDI = DMM * 100 / TR
     ADX = MA(ABS(MDI - PDI) / (PDI + MDI) * 100, M2)
     ADXR = (ADX + REF(ADX, M2)) / 2
@@ -183,8 +183,8 @@ def DMI(CLOSE, HIGH, LOW, M1=14, M2=6):  # 动向指标：结果和同花顺，�
 
 
 def TAQ(HIGH, LOW, N):  # 唐安奇通道(海龟)交易指标，大道至简，能穿越牛熊
-    UP = HHV(HIGH, N);
-    DOWN = LLV(LOW, N);
+    UP = HHV(HIGH, N)
+    DOWN = LLV(LOW, N)
     MID = (UP + DOWN) / 2
     return UP, MID, DOWN
 
@@ -192,7 +192,7 @@ def TAQ(HIGH, LOW, N):  # 唐安奇通道(海龟)交易指标，大道至简，�
 def KTN(CLOSE, HIGH, LOW, N=20, M=10):  # 肯特纳交易通道, N选20日，ATR选10日
     MID = EMA((HIGH + LOW + CLOSE) / 3, N)
     ATRN = ATR(CLOSE, HIGH, LOW, M)
-    UPPER = MID + 2 * ATRN;
+    UPPER = MID + 2 * ATRN
     LOWER = MID - 2 * ATRN
     return UPPER, MID, LOWER
 
@@ -210,15 +210,15 @@ def VR(CLOSE, VOL, M1=26):  # VR容量比率
 
 
 def EMV(HIGH, LOW, VOL, N=14, M=9):  # 简易波动指标
-    VOLUME = MA(VOL, N) / VOL;
+    VOLUME = MA(VOL, N) / VOL
     MID = 100 * (HIGH + LOW - REF(HIGH + LOW, 1)) / (HIGH + LOW)
-    EMV = MA(MID * VOLUME * (HIGH - LOW) / MA(HIGH - LOW, N), N);
+    EMV = MA(MID * VOLUME * (HIGH - LOW) / MA(HIGH - LOW, N), N)
     MAEMV = MA(EMV, M)
     return EMV, MAEMV
 
 
 def DPO(CLOSE, M1=20, M2=10, M3=6):  # 区间震荡线
-    DPO = CLOSE - REF(MA(CLOSE, M1), M2);
+    DPO = CLOSE - REF(MA(CLOSE, M1), M2)
     MADPO = MA(DPO, M3)
     return DPO, MADPO
 
@@ -230,13 +230,13 @@ def BRAR(OPEN, CLOSE, HIGH, LOW, M1=26):  # BRAR-ARBR 情绪指标
 
 
 def DFMA(CLOSE, N1=10, N2=50, M=10):  # 平行线差指标
-    DIF = MA(CLOSE, N1) - MA(CLOSE, N2);
+    DIF = MA(CLOSE, N1) - MA(CLOSE, N2)
     DIFMA = MA(DIF, M)  # 通达信指标叫DMA 同花顺叫新DMA
     return DIF, DIFMA
 
 
 def MTM(CLOSE, N=12, M=6):  # 动量指标
-    MTM = CLOSE - REF(CLOSE, N);
+    MTM = CLOSE - REF(CLOSE, N)
     MTMMA = MA(MTM, M)
     return MTM, MTMMA
 
@@ -248,13 +248,13 @@ def MASS(HIGH, LOW, N1=9, N2=25, M=6):  # 梅斯线
 
 
 def ROC(CLOSE, N=12, M=6):  # 变动率指标
-    ROC = 100 * (CLOSE - REF(CLOSE, N)) / REF(CLOSE, N);
+    ROC = 100 * (CLOSE - REF(CLOSE, N)) / REF(CLOSE, N)
     MAROC = MA(ROC, M)
     return ROC, MAROC
 
 
 def EXPMA(CLOSE, N1=12, N2=50):  # EMA指数平均数指标
-    return EMA(CLOSE, N1), EMA(CLOSE, N2);
+    return EMA(CLOSE, N1), EMA(CLOSE, N2)
 
 
 def OBV(CLOSE, VOL):  # 能量潮指标
@@ -268,14 +268,14 @@ def MFI(CLOSE, HIGH, LOW, VOL, N=14):  # MFI指标是成交量的RSI指标
 
 
 def ASI(OPEN, CLOSE, HIGH, LOW, M1=26, M2=10):  # 振动升降指标
-    LC = REF(CLOSE, 1);
-    AA = ABS(HIGH - LC);
-    BB = ABS(LOW - LC);
-    CC = ABS(HIGH - REF(LOW, 1));
-    DD = ABS(LC - REF(OPEN, 1));
-    R = IF((AA > BB) & (AA > CC), AA + BB / 2 + DD / 4, IF((BB > CC) & (BB > AA), BB + AA / 2 + DD / 4, CC + DD / 4));
-    X = (CLOSE - LC + (CLOSE - OPEN) / 2 + LC - REF(OPEN, 1));
-    SI = 16 * X / R * MAX(AA, BB);
-    ASI = SUM(SI, M1);
-    ASIT = MA(ASI, M2);
+    LC = REF(CLOSE, 1)
+    AA = ABS(HIGH - LC)
+    BB = ABS(LOW - LC)
+    CC = ABS(HIGH - REF(LOW, 1))
+    DD = ABS(LC - REF(OPEN, 1))
+    R = IF((AA > BB) & (AA > CC), AA + BB / 2 + DD / 4, IF((BB > CC) & (BB > AA), BB + AA / 2 + DD / 4, CC + DD / 4))
+    X = (CLOSE - LC + (CLOSE - OPEN) / 2 + LC - REF(OPEN, 1))
+    SI = 16 * X / R * MAX(AA, BB)
+    ASI = SUM(SI, M1)
+    ASIT = MA(ASI, M2)
     return ASI, ASIT

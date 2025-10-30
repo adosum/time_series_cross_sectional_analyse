@@ -96,8 +96,8 @@ def SAR(HIGH, LOW, N=10, S=2, M=20):
     :param M: 步长极限
     :return: 抛物转向
     """
-    f_step = S / 100;
-    f_max = M / 100;
+    f_step = S / 100
+    f_max = M / 100
     af = 0.0
     is_long = HIGH[N - 1] > HIGH[N - 2]
     b_first = True
@@ -132,7 +132,7 @@ def TDX_SAR(High, Low, iAFStep=2, iAFLimit=20):  # type: (np.ndarray, np.ndarray
     :param iAFLimit: AF极限值
     :return: SAR序列
     """
-    af_step = iAFStep / 100;
+    af_step = iAFStep / 100
     af_limit = iAFLimit / 100
     SarX = np.zeros(len(High))  # 初始化返回数组
 

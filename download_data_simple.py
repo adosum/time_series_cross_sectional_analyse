@@ -1,6 +1,5 @@
 import os
 import pandas as pd
-import yfinance as yf
 import datetime
 import akshare as ak
 import yfinance
