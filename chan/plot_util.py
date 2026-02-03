@@ -123,21 +123,24 @@ def plot_chan_analysis(
         ax_price, ax_c1c2, ax_rsi_adx, ax_signals = axes
         ax = ax_price  # Main price chart
 
-        # Prepare boduan indicators for the subset
+        # Prepare boduan indicators for the subset - FIXED INDEXING
         boduan_subset = {}
-        subset_indices = subset_df["index"].values
+
+        # Create mapping from original dataframe indices to boduan array positions
+        df_original_indices = chan.comp_df["index"].values
+        subset_original_indices = subset_df["index"].values
 
         for key, values in boduan_results.items():
             if hasattr(values, "__len__") and len(values) > 0:
-                # Extract boduan values for the specific indices in our subset
+                # Map subset original indices to boduan array positions
                 subset_values = []
-                for idx in subset_indices:
-                    if idx < len(values):
-                        subset_values.append(values[idx])
+                for orig_idx in subset_original_indices:
+                    # Find position in original dataframe
+                    pos_in_df = np.where(df_original_indices == orig_idx)[0]
+                    if len(pos_in_df) > 0 and pos_in_df[0] < len(values):
+                        subset_values.append(values[pos_in_df[0]])
                     else:
-                        subset_values.append(
-                            np.nan
-                        )  # Fill with NaN if index is out of bounds
+                        subset_values.append(np.nan)
                 boduan_subset[key] = np.array(subset_values)
             else:
                 boduan_subset[key] = values
