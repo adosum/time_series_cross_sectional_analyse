@@ -1,7 +1,7 @@
 import ctypes  # Needed for high-res DPI awareness
 import os
-import time
 import tkinter as tk
+import tkinter.font as tkfont
 import traceback
 from datetime import datetime
 
@@ -28,31 +28,106 @@ class FloatingHUD:
         self.root.attributes("-topmost", True)
 
         # --- 2. Adjust Geometry for 2K Screen ---
-        # Widened to 650 to prevent text clipping at larger font sizes
-        self.root.geometry("650x850")
+        # Wider layout for side-by-side multi-asset panels
+        self.root.geometry("1250x850")
         self.root.configure(bg="#1e1e1e")  # Darker background for pro look
+        self.base_font_size = 13
+        self.min_font_size = 8
 
-        # --- 3. Larger, Sharper Font ---
-        # Size 14 is the "sweet spot" for Consolas on a 2K monitor
-        self.label = tk.Label(
-            self.root,
-            text="Waiting for data...",
-            font=("Consolas", 14, "bold"),  # Added Bold for extra clarity
+        self.left_font = tkfont.Font(
+            family="Consolas", size=self.base_font_size, weight="bold"
+        )
+        self.right_font = tkfont.Font(
+            family="Consolas", size=self.base_font_size, weight="bold"
+        )
+
+        # --- 3. Two-column HUD panel ---
+        self.container = tk.Frame(self.root, bg="#1e1e1e")
+        self.container.pack(expand=True, fill="both", padx=10, pady=10)
+        self.container.grid_columnconfigure(0, weight=1)
+        self.container.grid_columnconfigure(1, weight=1)
+        self.container.grid_rowconfigure(0, weight=1)
+
+        self.left_label = tk.Label(
+            self.container,
+            text="USDCNH\nWaiting for data...",
+            font=self.left_font,
             bg="#1e1e1e",
-            fg="#00FF00",  # "Matrix Green" text looks great on dark
+            fg="#00FF00",
             justify=tk.LEFT,
             anchor="nw",
-            padx=20,
-            pady=20,
+            padx=12,
+            pady=12,
+            bd=1,
+            relief="solid",
+            wraplength=560,
         )
-        self.label.pack(expand=True, fill="both")
+        self.left_label.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        self.right_label = tk.Label(
+            self.container,
+            text="CORN\nWaiting for data...",
+            font=self.right_font,
+            bg="#1e1e1e",
+            fg="#00FF00",
+            justify=tk.LEFT,
+            anchor="nw",
+            padx=12,
+            pady=12,
+            bd=1,
+            relief="solid",
+            wraplength=560,
+        )
+        self.right_label.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        # 响应窗口大小变化，动态调整字体和换行宽度
+        self.root.bind("<Configure>", self._on_resize)
+
+    def _on_resize(self, event):
+        try:
+            if not self.root.winfo_exists():
+                return
+
+            width = max(self.root.winfo_width(), 400)
+            height = max(self.root.winfo_height(), 300)
+
+            # 根据可视面积估算字体，窗口缩小时自动减小字体
+            est_size_w = int(width / 95)
+            est_size_h = int(height / 65)
+            dynamic_size = max(
+                self.min_font_size, min(self.base_font_size, est_size_w, est_size_h)
+            )
+
+            self.left_font.configure(size=dynamic_size)
+            self.right_font.configure(size=dynamic_size)
+
+            panel_wrap = max(int((width - 80) / 2), 220)
+            if self.left_label.winfo_exists():
+                self.left_label.config(wraplength=panel_wrap)
+            if self.right_label.winfo_exists():
+                self.right_label.config(wraplength=panel_wrap)
+        except tk.TclError:
+            pass
 
     def refresh(self, content=None):
-        if content:
-            # We strip extra whitespace to keep the layout tight
-            self.label.config(text=content.strip())
-
         try:
+            if not self.root.winfo_exists():
+                return
+
+            if content:
+                if isinstance(content, dict):
+                    left_text = content.get("left", "USDCNH\nWaiting for data...")
+                    right_text = content.get("right", "CORN\nWaiting for data...")
+
+                    if self.left_label.winfo_exists():
+                        self.left_label.config(text=left_text.strip())
+                    if self.right_label.winfo_exists():
+                        self.right_label.config(text=right_text.strip())
+                else:
+                    # Backward-compatible fallback if plain text is passed
+                    if self.left_label.winfo_exists():
+                        self.left_label.config(text=str(content).strip())
+
             self.root.update_idletasks()
             self.root.update()
         except tk.TclError:
@@ -83,6 +158,17 @@ CONFIG = {
     "max_trend_positions": 3,  # 趋势中最大允许同向持仓数 (底仓 + 2次加仓)
     "trend_add_pos_atr_step": 0.5,
 }
+
+
+SYMBOL_PREFERENCES = {
+    "FX": ["USDCNH"],
+    "CORN": ["CORN.c"],
+}
+
+# Keep enough 15m bars for 1D AO(34) + ADX warmup while avoiding oversized fetches.
+M15_HISTORY_BARS = 4200
+M15_INCREMENT_BARS = 300
+ENGINE_TICK_MS = 150
 
 
 def validate_config(config):
@@ -156,8 +242,41 @@ def get_mt5_data(symbol, timeframe, num_bars):
     df = pd.DataFrame(rates)
     df["time"] = pd.to_datetime(df["time"], unit="s")
     df.set_index("time", inplace=True)
-    df.rename(columns={"tick_volume": "volume"}, inplace=True)
+
+    # 优先使用 tick_volume；若全为0则回退到 real_volume；仍不可用则给一个常数体积
+    if "tick_volume" in df.columns:
+        df.rename(columns={"tick_volume": "volume"}, inplace=True)
+    elif "real_volume" in df.columns:
+        df["volume"] = df["real_volume"]
+    else:
+        df["volume"] = 1.0
+
+    if (df["volume"] <= 0).all() and "real_volume" in df.columns:
+        if (df["real_volume"] > 0).any():
+            df["volume"] = df["real_volume"]
+
+    if (df["volume"] <= 0).all():
+        df["volume"] = 1.0
+
+    # 过滤无效价格行（部分合约可能出现0价占位bar，导致指标全失真）
+    price_cols = ["open", "high", "low", "close"]
+    for col in price_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=price_cols)
+    df = df[(df["open"] > 0) & (df["high"] > 0) & (df["low"] > 0) & (df["close"] > 0)]
+
+    df.sort_index(inplace=True)
     return df
+
+
+def resolve_available_symbol(symbol_candidates):
+    """Return the first available symbol name from candidates."""
+    for name in symbol_candidates:
+        info = mt5.symbol_info(name)
+        if info is not None:
+            mt5.symbol_select(name, True)
+            return name
+    return None
 
 
 # ==========================================
@@ -191,6 +310,14 @@ def build_multi_timeframe_features(df_15m):
         volume=df["volume"],
         window=20,
     ).money_flow_index()
+
+    # 部分期货/差价合约在MT5里 volume 质量较差，MFI可能全NaN；回退为中性值
+    for mfi_col in ["MFI_10", "MFI_14", "MFI_20"]:
+        if df[mfi_col].isna().all():
+            df[mfi_col] = 50.0
+        else:
+            df[mfi_col] = df[mfi_col].fillna(50.0)
+
     df["ATR_Fast"] = AverageTrueRange(
         high=df["high"], low=df["low"], close=df["close"], window=14
     ).average_true_range()
@@ -240,7 +367,33 @@ def build_multi_timeframe_features(df_15m):
     df = df.join(df_4h_shifted).ffill()
     df = df.join(df_1d_shifted).ffill()
 
-    return df.dropna()
+    # 某些合约高周期指标可能长期缺失，回退到中性值避免全量过滤
+    df["ADX_4H"] = df["ADX_4H"].ffill().bfill().fillna(20.0)
+    df["ADX_1D"] = df["ADX_1D"].ffill().bfill().fillna(20.0)
+    df["AO_4H"] = df["AO_4H"].ffill().bfill().fillna(0.0)
+    df["AO_1D"] = df["AO_1D"].ffill().bfill().fillna(0.0)
+
+    # 仅按策略关键列做过滤，避免因为无关列NaN导致整表被清空
+    required_cols = [
+        "ADX_1D",
+        "ADX_4H",
+        "AO_1D",
+        "AO_4H",
+        "MFI_10",
+        "MFI_14",
+        "MFI_20",
+        "ATR_Fast",
+        "ATR_Slow",
+        "BB_Lower",
+        "BB_Upper",
+        "Donchian_Upper_20",
+        "Donchian_Lower_10",
+        "Donchian_Lower_20",
+        "Donchian_Upper_10",
+    ]
+    clean_df = df.replace([float("inf"), float("-inf")], pd.NA)
+    clean_df = clean_df.dropna(subset=required_cols)
+    return clean_df
 
 
 # ==========================================
@@ -503,6 +656,10 @@ def update_trailing_stops(latest_state, current_positions, market_regime):
     long_defense_line = latest_state["Donchian_Lower_10"]  # 多头防守线
     short_defense_line = latest_state["Donchian_Upper_10"]  # 空头防守线
 
+    # 新品种/历史不足时 Donchian 可能尚未就绪，避免 NaN 比较导致异常逻辑。
+    if pd.isna(long_defense_line) or pd.isna(short_defense_line):
+        return "[TRAILING STOP SKIPPED] Donchian defense line not ready (NaN)."
+
     updates_msg = []
 
     for pos in current_positions:
@@ -512,7 +669,7 @@ def update_trailing_stops(latest_state, current_positions, market_regime):
         # 处理多单 (BUY)
         if pos.type == mt5.ORDER_TYPE_BUY:
             # 只有当新的防守线 高于 当前的止损线时，才允许上移止损 (止损只能顺势移动，不能倒退)
-            if long_defense_line > current_sl:
+            if not pd.isna(current_sl) and long_defense_line > current_sl:
                 # [TODO: 调用 mt5.order_send 发送修改 SL 的指令]
                 updates_msg.append(
                     f"多单 #{ticket} SL 上移: {current_sl:.5f} -> {long_defense_line:.5f}"
@@ -522,6 +679,8 @@ def update_trailing_stops(latest_state, current_positions, market_regime):
         elif pos.type == mt5.ORDER_TYPE_SELL:
             # 只有当新的防守线 低于 当前的止损线时，才允许下移止损
             # 注意：如果原本没有止损 (sl==0)，也必须挂上
+            if pd.isna(current_sl):
+                current_sl = 0.0
             if current_sl == 0.0 or short_defense_line < current_sl:
                 # [TODO: 调用 mt5.order_send 发送修改 SL 的指令]
                 updates_msg.append(
@@ -537,41 +696,163 @@ def update_trailing_stops(latest_state, current_positions, market_regime):
 # ==========================================
 # 模块 4：HUD 仪表盘文件桥接
 # ==========================================
-def update_mt5_dashboard(latest_state, market_regime, signal_msg, signal_tracker=None):
+def update_mt5_dashboard(symbol_snapshots):
     """
     Returns a formatted string for the FloatingHUD and updates the MT5 file.
     """
     terminal_info = mt5.terminal_info()
 
-    # --- 1. Build the Dashboard String ---
+    def explain_regime(latest_state, config, market_regime):
+        adx_1d = latest_state["ADX_1D"]
+        adx_4h = latest_state["ADX_4H"]
+        trend_th = config["macro_trend_adx"]
+        range_th = config["macro_range_adx"]
+
+        if market_regime == "TREND":
+            return (
+                f"TREND because ADX_1D={adx_1d:.2f}>{trend_th:.2f} and "
+                f"ADX_4H={adx_4h:.2f}>{trend_th:.2f}"
+            )
+        if market_regime == "RANGE":
+            return (
+                f"RANGE because ADX_1D={adx_1d:.2f}<{range_th:.2f} and "
+                f"ADX_4H={adx_4h:.2f}<{range_th:.2f}"
+            )
+        return (
+            f"MIXED because ADXs not aligned: ADX_1D={adx_1d:.2f}, "
+            f"ADX_4H={adx_4h:.2f}, trend>{trend_th:.2f}, range<{range_th:.2f}"
+        )
+
+    def explain_ao(latest_state):
+        ao_1d = latest_state["AO_1D"]
+        ao_4h = latest_state["AO_4H"]
+        ao_15m = latest_state["AO_15m"]
+
+        if ao_1d > 0 and ao_4h > 0:
+            macro_bias = "Macro bullish bias (1D & 4H both > 0)"
+        elif ao_1d < 0 and ao_4h < 0:
+            macro_bias = "Macro bearish bias (1D & 4H both < 0)"
+        else:
+            macro_bias = "Macro mixed bias (1D and 4H disagree)"
+
+        if ao_15m > 0:
+            micro_momentum = "15m momentum currently up"
+        elif ao_15m < 0:
+            micro_momentum = "15m momentum currently down"
+        else:
+            micro_momentum = "15m momentum neutral"
+
+        return f"{macro_bias}; {micro_momentum}"
+
+    local_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # --- 1. Build the Dashboard String (for MT5 file) ---
     text = "========================================\n"
-    text += "           QUANT ENGINE: ACTIVE         \n"
+    text += "      QUANT ENGINE: MULTI-ASSET         \n"
     text += "========================================\n"
-    text += f"Local Time: {datetime.now().strftime('%H:%M:%S')}\n"
-    text += f"Bar Time  : {latest_state.name}\n"
-    text += f"Regime    : [{market_regime}]\n"
-    text += "----------------------------------------\n"
-    text += "[Macro (1D & 4H)]\n"
-    text += f"ADX 1D: {latest_state['ADX_1D']:>6.2f} | AO 1D: {latest_state['AO_1D']:>7.5f}\n"
-    text += f"ADX 4H: {latest_state['ADX_4H']:>6.2f} | AO 4H: {latest_state['AO_4H']:>7.5f}\n"
-    text += "----------------------------------------\n"
-    text += "[Micro (15m)]\n"
-    text += f"MFI(14): {latest_state['MFI_14']:>6.2f}\n"
-    text += f"ATR(14): {latest_state['ATR_Fast']:>7.5f}\n"
-    text += (
-        f"B-Bands: {latest_state['BB_Lower']:.5f} - {latest_state['BB_Upper']:.5f}\n"
-    )
+    text += f"Local Time: {local_time_str}\n"
     text += "========================================\n"
 
-    if signal_tracker is not None:
+    hud_panels = {
+        "left": "USDCNH\nWaiting for data...",
+        "right": "CORN\nWaiting for data...",
+    }
+
+    for symbol, snapshot in symbol_snapshots.items():
+        text += f"[{symbol}]\n"
+
+        panel_lines = [f"[{symbol}]"]
+
+        if "error" in snapshot:
+            text += f"Local Time: {local_time_str}\n"
+            text += f"Status    : {snapshot['error']}\n"
+            text += "----------------------------------------\n"
+            panel_lines.append(f"Local Time: {local_time_str}")
+            panel_lines.append(f"Status   : {snapshot['error']}")
+            panel_text = "\n".join(panel_lines)
+            if "USDCNH" in symbol.upper():
+                hud_panels["left"] = panel_text
+            else:
+                hud_panels["right"] = panel_text
+            continue
+
+        latest_state = snapshot["latest_state"]
+        market_regime = snapshot["market_regime"]
+        signal_msg = snapshot["signal_msg"]
+        current_price = snapshot["current_price"]
+        signal_tracker = snapshot["signal_tracker"]
+        vol_ratio = (
+            latest_state["ATR_Fast"] / latest_state["ATR_Slow"]
+            if latest_state["ATR_Slow"] > 0
+            else 1.0
+        )
+        regime_reason = explain_regime(latest_state, CONFIG, market_regime)
+        ao_reason = explain_ao(latest_state)
+
+        text += f"Local Time: {local_time_str}\n"
+        text += f"Bar Time  : {snapshot['bar_time']}\n"
+        text += f"Regime    : [{market_regime}]\n"
+        text += f"Reason    : {regime_reason}\n"
+        text += f"Last Px   : {current_price:.5f}\n"
+        text += f"AO 1D/4H/15m: {latest_state['AO_1D']:.5f} / {latest_state['AO_4H']:.5f} / {latest_state['AO_15m']:.5f}\n"
+        text += f"AO Explain: {ao_reason}\n"
+        text += "[Macro 1D/4H]\n"
+        text += f"ADX 1D: {latest_state['ADX_1D']:>6.2f} | AO 1D: {latest_state['AO_1D']:>7.5f}\n"
+        text += f"ADX 4H: {latest_state['ADX_4H']:>6.2f} | AO 4H: {latest_state['AO_4H']:>7.5f}\n"
+        text += f"ADX Thresholds -> TREND>{CONFIG['macro_trend_adx']:.2f}, RANGE<{CONFIG['macro_range_adx']:.2f}\n"
+        text += "[Micro 15m]\n"
+        text += f"MFI 10/14/20: {latest_state['MFI_10']:.2f} / {latest_state['MFI_14']:.2f} / {latest_state['MFI_20']:.2f}\n"
+        text += f"ATR Fast/Slow: {latest_state['ATR_Fast']:.5f} / {latest_state['ATR_Slow']:.5f} | Ratio: {vol_ratio:.2f}x\n"
+        text += f"B-Bands : {latest_state['BB_Lower']:.5f} - {latest_state['BB_Upper']:.5f}\n"
+        text += (
+            f"Donchian U20/L10/L20/U10: {latest_state['Donchian_Upper_20']:.5f} / {latest_state['Donchian_Lower_10']:.5f} / "
+            f"{latest_state['Donchian_Lower_20']:.5f} / {latest_state['Donchian_Upper_10']:.5f}\n"
+        )
+
         cooldown_info = f"Last Signal: {signal_tracker.last_executed_signal}"
         if signal_tracker.last_executed_signal in ["LONG", "SHORT"]:
             cooldown_info += f" (Bar #{signal_tracker.signal_bar_count})"
-        text += f"[Cooldown Status]\n{cooldown_info}\n"
+        text += f"Cooldown  : {cooldown_info}\n"
+
+        action_text = signal_msg if signal_msg else "SCANNING..."
+        text += f"Action    : {action_text}\n"
         text += "----------------------------------------\n"
 
-    action_text = signal_msg if signal_msg else "SCANNING..."
-    text += f"ACTION: {action_text}\n"
+        panel_lines.append(f"Local Time: {local_time_str}")
+        panel_lines.append(f"Bar Time : {snapshot['bar_time']}")
+        panel_lines.append(f"Regime   : [{market_regime}]")
+        panel_lines.append(f"Reason   : {regime_reason}")
+        panel_lines.append(f"Last Px  : {current_price:.5f}")
+        panel_lines.append(
+            f"AO 1D/4H/15m: {latest_state['AO_1D']:.5f} / {latest_state['AO_4H']:.5f} / {latest_state['AO_15m']:.5f}"
+        )
+        panel_lines.append(f"AO Explain: {ao_reason}")
+        panel_lines.append(
+            f"ADX 1D/4H : {latest_state['ADX_1D']:.2f} / {latest_state['ADX_4H']:.2f}"
+        )
+        panel_lines.append(
+            f"MFI 10/14/20: {latest_state['MFI_10']:.2f} / {latest_state['MFI_14']:.2f} / {latest_state['MFI_20']:.2f}"
+        )
+        panel_lines.append(
+            f"ATR F/S/R : {latest_state['ATR_Fast']:.5f} / {latest_state['ATR_Slow']:.5f} / {vol_ratio:.2f}x"
+        )
+        panel_lines.append(
+            f"B-Bands  : {latest_state['BB_Lower']:.5f} - {latest_state['BB_Upper']:.5f}"
+        )
+        panel_lines.append(
+            f"Donch U20/L10: {latest_state['Donchian_Upper_20']:.5f} / {latest_state['Donchian_Lower_10']:.5f}"
+        )
+        panel_lines.append(
+            f"Donch L20/U10: {latest_state['Donchian_Lower_20']:.5f} / {latest_state['Donchian_Upper_10']:.5f}"
+        )
+        panel_lines.append(f"Cooldown : {cooldown_info}")
+        panel_lines.append(f"Action   : {action_text}")
+
+        panel_text = "\n".join(panel_lines)
+        if "USDCNH" in symbol.upper():
+            hud_panels["left"] = panel_text
+        else:
+            hud_panels["right"] = panel_text
 
     # --- 2. Keep the File Update (Optional) ---
     if terminal_info:
@@ -581,11 +862,11 @@ def update_mt5_dashboard(latest_state, market_regime, signal_msg, signal_tracker
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(text)
-        except Exception as e:
+        except Exception:
             pass  # Silent fail for file if folder isn't ready
 
-    # --- 3. Return the string for the FloatingHUD ---
-    return text
+    # --- 3. Return both file text and panel payload for FloatingHUD ---
+    return text, hud_panels
 
 
 # ==========================================
@@ -666,32 +947,93 @@ def execute_trade(
 def main():
     validate_config(CONFIG)
     hud = FloatingHUD()
-    dashboard_string = "Initializing Engine..."
+    dashboard_panels = {
+        "left": "USDCNH\nInitializing Engine...",
+        "right": "CORN\nInitializing Engine...",
+    }
     if not mt5.initialize():
         print(f"MT5 Initialization Failed: {mt5.last_error()}")
         return
 
-    symbol = "USDCNH"
-    print(f"[{datetime.now()}] === Quant Engine Started -> Target: {symbol} ===")
-    mt5.symbol_select(symbol, True)
+    fx_symbol = resolve_available_symbol(SYMBOL_PREFERENCES["FX"])
+    corn_symbol = resolve_available_symbol(SYMBOL_PREFERENCES["CORN"])
 
-    last_processed_time = None
-    signal_tracker = SignalTracker()  # 初始化冷静期追踪器
+    active_symbols = [s for s in [fx_symbol, corn_symbol] if s is not None]
+    if not active_symbols:
+        print("❌ No valid symbols found for USDCNH/CORN in this MT5 terminal.")
+        mt5.shutdown()
+        return
 
-    while True:
+    print(
+        f"[{datetime.now()}] === Quant Engine Started -> Targets: {active_symbols} ==="
+    )
+
+    last_processed_time = {symbol: None for symbol in active_symbols}
+    signal_trackers = {symbol: SignalTracker() for symbol in active_symbols}
+    raw_cache = {symbol: None for symbol in active_symbols}
+    symbol_snapshots = {
+        symbol: {"error": "Waiting for first bar..."} for symbol in active_symbols
+    }
+    is_running = True
+
+    def upsert_raw_cache(symbol):
+        """Maintain a rolling M15 cache instead of re-fetching huge history every cycle."""
+        if raw_cache[symbol] is None:
+            df_seed = get_mt5_data(symbol, mt5.TIMEFRAME_M15, M15_HISTORY_BARS)
+            raw_cache[symbol] = df_seed
+            return raw_cache[symbol]
+
+        df_new = get_mt5_data(symbol, mt5.TIMEFRAME_M15, M15_INCREMENT_BARS)
+        if df_new is None or len(df_new) == 0:
+            return raw_cache[symbol]
+
+        merged = pd.concat([raw_cache[symbol], df_new])
+        merged = merged[~merged.index.duplicated(keep="last")]
+        merged.sort_index(inplace=True)
+        raw_cache[symbol] = merged.tail(M15_HISTORY_BARS)
+        return raw_cache[symbol]
+
+    def on_close():
+        nonlocal is_running
+        is_running = False
         try:
-            hud.refresh(dashboard_string)
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 1)
-            if rates is None or len(rates) == 0:
-                continue
+            if hud.root.winfo_exists():
+                hud.root.destroy()
+        except tk.TclError:
+            pass
 
-            current_bar_time = rates[0]["time"]
+    hud.root.protocol("WM_DELETE_WINDOW", on_close)
 
-            # 探测到 15m 新 K 线产生
-            if last_processed_time != current_bar_time:
-                # 提取过去 1500 根 15m K线 (约15个交易日，确保1D指标有足够数据计算)
-                df_raw = get_mt5_data(symbol, mt5.TIMEFRAME_M15, 8000)
-                if df_raw is not None:
+    def process_cycle():
+        nonlocal dashboard_panels
+        if not is_running:
+            return
+
+        try:
+            hud.refresh(dashboard_panels)
+            dashboard_needs_refresh = False
+
+            for symbol in active_symbols:
+                rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 1)
+                if rates is None or len(rates) == 0:
+                    symbol_snapshots[symbol] = {
+                        "error": "No M15 data returned from MT5"
+                    }
+                    dashboard_needs_refresh = True
+                    continue
+
+                current_bar_time = rates[0]["time"]
+
+                # 探测到 15m 新 K 线产生
+                if last_processed_time[symbol] != current_bar_time:
+                    # 维护滚动历史，避免每次都全量拉取超长区间。
+                    df_raw = upsert_raw_cache(symbol)
+                    if df_raw is None or len(df_raw) < 200:
+                        symbol_snapshots[symbol] = {"error": "Insufficient M15 history"}
+                        last_processed_time[symbol] = current_bar_time
+                        dashboard_needs_refresh = True
+                        continue
+
                     # 0. 查账户底牌 (获取当前品种的所有持仓)
                     current_positions = mt5.positions_get(symbol=symbol)
                     if current_positions is None:  # MT5 可能返回 None，防错处理
@@ -699,6 +1041,13 @@ def main():
 
                     # 1. 计算所有指标
                     strategy_data = build_multi_timeframe_features(df_raw)
+                    if strategy_data is None or len(strategy_data) < 2:
+                        symbol_snapshots[symbol] = {
+                            "error": f"Feature pipeline not ready (rows={0 if strategy_data is None else len(strategy_data)}, raw={len(df_raw)})"
+                        }
+                        last_processed_time[symbol] = current_bar_time
+                        dashboard_needs_refresh = True
+                        continue
 
                     # 2. 提取最新固化状态 (倒数第二根K线) 和 最新Tick价格
                     latest_state = strategy_data.iloc[-2]
@@ -709,38 +1058,47 @@ def main():
                         latest_state,
                         CONFIG,
                         current_price,
-                        signal_tracker,
+                        signal_trackers[symbol],
                         current_positions,
                     )
                     ts_msg = update_trailing_stops(
                         latest_state, current_positions, market_regime
                     )
                     if ts_msg:
-                        print(f"\n[🛡️ 风控系统] {ts_msg}")
+                        print(f"\n[🛡️ {symbol} 风控系统] {ts_msg}")
+
                     # 4. 打印到控制台
-                    print(f"\n[{latest_state.name}] Regime: {market_regime}")
+                    print(f"\n[{symbol}] [{latest_state.name}] Regime: {market_regime}")
                     if signal_msg:
                         print(f">>> {signal_msg}")
 
-                    # 5. 发送数据给 MT5 图表显示器（并传递冷静期状态）
-                    dashboard_string = update_mt5_dashboard(
-                        latest_state, market_regime, signal_msg, signal_tracker
-                    )
+                    symbol_snapshots[symbol] = {
+                        "bar_time": latest_state.name,
+                        "market_regime": market_regime,
+                        "signal_msg": signal_msg,
+                        "latest_state": latest_state,
+                        "current_price": current_price,
+                        "signal_tracker": signal_trackers[symbol],
+                    }
 
-                last_processed_time = current_bar_time
+                    last_processed_time[symbol] = current_bar_time
+                    dashboard_needs_refresh = True
 
-            for _ in range(10):
-                hud.refresh()  # Just process window events (clicks/drags)
-                time.sleep(0.1)
+            if dashboard_needs_refresh:
+                _, dashboard_panels = update_mt5_dashboard(symbol_snapshots)
 
         except KeyboardInterrupt:
             print("\nShutting down MT5 connection...")
-            break
+            on_close()
         except Exception as e:
             print(f"Runtime Error: {e}")
             traceback.print_exc()
-            time.sleep(5)
+        finally:
+            if is_running:
+                hud.root.after(ENGINE_TICK_MS, process_cycle)
 
+    process_cycle()
+    hud.root.mainloop()
     mt5.shutdown()
 
 
