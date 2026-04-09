@@ -1,0 +1,11 @@
+# Requirements inferred from research.ipynb
+# yfinance is used to fetch market data
+yfinance
+# akshare is used for China/US bond yields
+akshare
+# Scientific computing and optimization
+scipy
+# Data handling (required by yfinance and common in analysis)
+pandas
+# Numerical arrays
+numpy
