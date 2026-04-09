@@ -280,12 +280,12 @@ def resolve_available_symbol(symbol_candidates):
 
 
 # ==========================================
-# 模块 2：多周期特征工程 (核心数据工厂)
+# 模块 2：多周期特征工程 (原生 MTF + AsOf 对齐)
 # ==========================================
-def build_multi_timeframe_features(df_15m):
+def build_multi_timeframe_features(df_15m, df_4h, df_1d):
     df = df_15m.copy()
 
-    # --- 1. 计算 15m 微观指标 ---
+    # --- 1. 计算 15m 微观指标 (不变) ---
     df["AO_15m"] = AwesomeOscillatorIndicator(
         window1=5, window2=34, high=df["high"], low=df["low"]
     ).awesome_oscillator()
@@ -311,7 +311,6 @@ def build_multi_timeframe_features(df_15m):
         window=20,
     ).money_flow_index()
 
-    # 部分期货/差价合约在MT5里 volume 质量较差，MFI可能全NaN；回退为中性值
     for mfi_col in ["MFI_10", "MFI_14", "MFI_20"]:
         if df[mfi_col].isna().all():
             df[mfi_col] = 50.0
@@ -331,19 +330,10 @@ def build_multi_timeframe_features(df_15m):
 
     df["Donchian_Upper_20"] = df["high"].rolling(window=20).max().shift(1)
     df["Donchian_Lower_10"] = df["low"].rolling(window=10).min().shift(1)
+    df["Donchian_Lower_20"] = df["low"].rolling(window=20).min().shift(1)
+    df["Donchian_Upper_10"] = df["high"].rolling(window=10).max().shift(1)
 
-    df["Donchian_Lower_20"] = df["low"].rolling(window=20).min().shift(1)  # 做空跌破线
-    df["Donchian_Upper_10"] = df["high"].rolling(window=10).max().shift(1)  # 做空防守线
-
-    # --- 2. 向上合成 4H 数据 ---
-    agg_dict = {
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-    }
-    df_4h = df.resample("4h").agg(agg_dict).dropna()
+    # --- 2. 在原生的 4H 和 1D 数据上直接计算指标 ---
     df_4h["ADX_4H"] = ADXIndicator(
         high=df_4h["high"], low=df_4h["low"], close=df_4h["close"], window=14
     ).adx()
@@ -351,8 +341,6 @@ def build_multi_timeframe_features(df_15m):
         window1=5, window2=34, high=df_4h["high"], low=df_4h["low"]
     ).awesome_oscillator()
 
-    # --- 3. 向上合成 1D 数据 ---
-    df_1d = df.resample("D").agg(agg_dict).dropna()
     df_1d["ADX_1D"] = ADXIndicator(
         high=df_1d["high"], low=df_1d["low"], close=df_1d["close"], window=14
     ).adx()
@@ -360,36 +348,36 @@ def build_multi_timeframe_features(df_15m):
         window1=5, window2=34, high=df_1d["high"], low=df_1d["low"]
     ).awesome_oscillator()
 
-    # --- 4. 跨周期安全对齐 (防未来函数) ---
-    df_4h_shifted = df_4h[["ADX_4H", "AO_4H"]].shift(1)
-    df_1d_shifted = df_1d[["ADX_1D", "AO_1D"]].shift(1)
+    # --- 3. Shift 防止未来函数，并提取所需列 ---
+    df_4h_shifted = df_4h[["ADX_4H", "AO_4H"]].shift(1).dropna()
+    df_1d_shifted = df_1d[["ADX_1D", "AO_1D"]].shift(1).dropna()
 
-    df = df.join(df_4h_shifted).ffill()
-    df = df.join(df_1d_shifted).ffill()
+    # --- 4. 核武器：使用 merge_asof 进行完美的时间轴对齐 ---
+    # 这解决了玉米 15m 的 03:00 和日线的 00:00 无法 join 的问题
+    # direction='backward' 保证了在任何时刻，只使用过去最新固化的数据
+    df = pd.merge_asof(
+        df, df_4h_shifted, left_index=True, right_index=True, direction="backward"
+    )
+    df = pd.merge_asof(
+        df, df_1d_shifted, left_index=True, right_index=True, direction="backward"
+    )
 
-    # 某些合约高周期指标可能长期缺失，回退到中性值避免全量过滤
+    # 回退机制：极少数情况下回填
     df["ADX_4H"] = df["ADX_4H"].ffill().bfill().fillna(20.0)
     df["ADX_1D"] = df["ADX_1D"].ffill().bfill().fillna(20.0)
     df["AO_4H"] = df["AO_4H"].ffill().bfill().fillna(0.0)
     df["AO_1D"] = df["AO_1D"].ffill().bfill().fillna(0.0)
 
-    # 仅按策略关键列做过滤，避免因为无关列NaN导致整表被清空
+    # 清理 NaN
     required_cols = [
         "ADX_1D",
         "ADX_4H",
         "AO_1D",
         "AO_4H",
         "MFI_10",
-        "MFI_14",
-        "MFI_20",
         "ATR_Fast",
-        "ATR_Slow",
         "BB_Lower",
-        "BB_Upper",
         "Donchian_Upper_20",
-        "Donchian_Lower_10",
-        "Donchian_Lower_20",
-        "Donchian_Upper_10",
     ]
     clean_df = df.replace([float("inf"), float("-inf")], pd.NA)
     clean_df = clean_df.dropna(subset=required_cols)
@@ -1028,8 +1016,21 @@ def main():
                 if last_processed_time[symbol] != current_bar_time:
                     # 维护滚动历史，避免每次都全量拉取超长区间。
                     df_raw = upsert_raw_cache(symbol)
-                    if df_raw is None or len(df_raw) < 200:
-                        symbol_snapshots[symbol] = {"error": "Insufficient M15 history"}
+
+                    # [新增] 并行获取原生的 4H 和 1D 数据 (只需拉取足够算指标的根数，如100根)
+                    # 这彻底解决了长周期计算需要拉取几万根 15m K线的问题
+                    df_4h = get_mt5_data(symbol, mt5.TIMEFRAME_H4, 100)
+                    df_1d = get_mt5_data(symbol, mt5.TIMEFRAME_D1, 100)
+
+                    if (
+                        df_raw is None
+                        or len(df_raw) < 200
+                        or df_4h is None
+                        or df_1d is None
+                    ):
+                        symbol_snapshots[symbol] = {
+                            "error": "Insufficient native history (M15, H4, or D1)"
+                        }
                         last_processed_time[symbol] = current_bar_time
                         dashboard_needs_refresh = True
                         continue
@@ -1040,7 +1041,7 @@ def main():
                         current_positions = ()
 
                     # 1. 计算所有指标
-                    strategy_data = build_multi_timeframe_features(df_raw)
+                    strategy_data = build_multi_timeframe_features(df_raw, df_4h, df_1d)
                     if strategy_data is None or len(strategy_data) < 2:
                         symbol_snapshots[symbol] = {
                             "error": f"Feature pipeline not ready (rows={0 if strategy_data is None else len(strategy_data)}, raw={len(df_raw)})"
