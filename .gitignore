@@ -2,3 +2,5 @@
 /results/
 /tmp_results/
 /.idea/
+.venv/
+.devcontainer/

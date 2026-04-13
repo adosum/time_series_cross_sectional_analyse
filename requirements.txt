@@ -1,3 +1,6 @@
+# Needed to resolve CUDA-specific PyTorch wheels like +cu128
+--extra-index-url https://download.pytorch.org/whl/cu128
+
 # Requirements inferred from research.ipynb
 # yfinance is used to fetch market data
 yfinance
@@ -9,3 +12,11 @@ scipy
 pandas
 # Numerical arrays
 numpy
+# Deep learning
+torch==2.11.0+cu128
+# ML preprocessing utilities (StandardScaler)
+scikit-learn
+# Progress bars
+tqdm
+# Technical analysis indicators
+ta
