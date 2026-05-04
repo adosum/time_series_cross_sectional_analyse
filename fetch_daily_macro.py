@@ -107,21 +107,25 @@ def update_bond_zh_us_rates(csv_path: str, start_default: str = "2015-01-01") ->
         existing = pd.DataFrame()
 
     if pd.to_datetime(start_date).date() > today:
-        return
-
-    new_data = ak.bond_zh_us_rate(start_date=start_date)
-    if new_data.empty:
-        return
-
-    new_data["date"] = pd.to_datetime(new_data["日期"]).dt.date
-    new_data.drop(["日期"], axis=1, inplace=True)
-    new_data["date"] = new_data["date"].astype(str)
-
-    if existing.empty:
-        combined = new_data
+        if existing.empty:
+            return
+        combined = existing.copy()
     else:
-        combined = pd.concat([existing, new_data], ignore_index=True)
-        combined = combined.drop_duplicates(subset=["date"], keep="last")
+        new_data = ak.bond_zh_us_rate(start_date=start_date)
+        if new_data.empty:
+            if existing.empty:
+                return
+            combined = existing.copy()
+        else:
+            new_data["date"] = pd.to_datetime(new_data["日期"]).dt.date
+            new_data.drop(["日期"], axis=1, inplace=True)
+            new_data["date"] = new_data["date"].astype(str)
+
+            if existing.empty:
+                combined = new_data
+            else:
+                combined = pd.concat([existing, new_data], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["date"], keep="last")
 
     base_cols = [
         c
@@ -129,6 +133,19 @@ def update_bond_zh_us_rates(csv_path: str, start_default: str = "2015-01-01") ->
         if c != "date" and not c.endswith("_change") and not c.endswith("_pct_change")
     ]
     combined = combined[["date"] + base_cols]
+
+    # AKShare may publish a newest date where US yields are not yet populated.
+    # Keep only rows where at least one core US treasury point exists.
+    us_core_cols = [
+        c
+        for c in ["美国国债收益率2年", "美国国债收益率5年", "美国国债收益率10年", "美国国债收益率30年"]
+        if c in combined.columns
+    ]
+    if us_core_cols:
+        for col in us_core_cols:
+            combined[col] = pd.to_numeric(combined[col], errors="coerce")
+        combined = combined.dropna(subset=us_core_cols, how="all")
+
     combined.sort_values("date", inplace=True)
 
     for col in base_cols:
@@ -211,6 +228,25 @@ def generate_today_txt(csv_paths: dict, output_txt: str) -> None:
             # Fall back to latest available data
             latest_date = df["date"].max()
             today_data = df[df["date"] == latest_date]
+
+        # For bond data, if today's row exists but US yield fields are not populated yet
+        # (common due to publication timing/time-zone lag), fall back to latest valid US row.
+        if dataset_name == "bond_zh_us_rate":
+            us_core_cols = [
+                c
+                for c in ["美国国债收益率2年", "美国国债收益率5年", "美国国债收益率10年", "美国国债收益率30年"]
+                if c in df.columns
+            ]
+            if us_core_cols:
+                has_us_value = False
+                if not today_data.empty:
+                    has_us_value = today_data[us_core_cols].notna().any(axis=1).any()
+
+                if not has_us_value:
+                    valid_us_df = df[df[us_core_cols].notna().any(axis=1)]
+                    if not valid_us_df.empty:
+                        latest_us_date = valid_us_df["date"].max()
+                        today_data = valid_us_df[valid_us_df["date"] == latest_us_date]
 
         if today_data.empty:
             continue

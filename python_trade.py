@@ -4,15 +4,24 @@ import tkinter as tk
 import tkinter.font as tkfont
 import traceback
 from datetime import datetime
+import yaml
 
 import MetaTrader5 as mt5
+import numpy as np
 import pandas as pd
+import torch
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler
 from ta.momentum import AwesomeOscillatorIndicator
+from transformer_perdictor.model import USDCNHTransformer
 
 # 引入纯血 ta 库 (无需 C++ 编译)
 from ta.trend import ADXIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
 from ta.volume import MFIIndicator
+
+# Import unified feature engineering module
+from feature_engineering import build_all_features, get_feature_cols
 
 
 class FloatingHUD:
@@ -170,6 +179,21 @@ M15_HISTORY_BARS = 4200
 M15_INCREMENT_BARS = 300
 ENGINE_TICK_MS = 150
 
+# 默认映射: CNH checkpoint -> USDCNH, 通用 checkpoint -> CORN
+# Now includes training config files for proper model initialization
+MODEL_RUNTIME_CONFIG = {
+    "USDCNH": {
+        "model_path": r"C:\Users\a6744\OneDrive - Terranet AB\Dokument\cnh_best_transformer_model.pth",
+        "scaler_csv": r"C:\Users\a6744\OneDrive - Terranet AB\Dokument\USDCNH_MTF_ML_ready.csv",
+        "config_file": r"C:\Users\a6744\OneDrive - Terranet AB\Dokument\config_cnh.yaml",
+    },
+    "CORN": {
+        "model_path": r"C:\Users\a6744\OneDrive - Terranet AB\Dokument\corn_best_transformer_model.pth",
+        "scaler_csv": r"C:\Users\a6744\OneDrive - Terranet AB\Dokument\CORN_MTF_ML_ready.csv",
+        "config_file": r"C:\Users\a6744\OneDrive - Terranet AB\Dokument\config_corn.yaml",
+    },
+}
+
 
 def validate_config(config):
     """验证配置参数的合理性，防止运行时错误"""
@@ -187,6 +211,471 @@ def validate_config(config):
     if config["trend_mfi_confirm"] < 0 or config["trend_mfi_confirm"] > 100:
         raise ValueError("配置致命错误: trend_mfi_confirm 应该在 [0, 100] 范围内！")
     print("✅ 配置参数校验通过！")
+
+
+def infer_asset_key(symbol):
+    upper = symbol.upper()
+    if "USDCNH" in upper:
+        return "USDCNH"
+    if "CORN" in upper:
+        return "CORN"
+    return upper
+
+
+def update_error_history_live(error_history, new_error):
+    return error_history[1:] + [float(new_error)]
+
+
+def _ensure_time_cyc_features(df, feature_cols):
+    """Ensure Time_Sin/Time_Cos exist when requested by the model feature list."""
+    needs_time_sin = "Time_Sin" in feature_cols and "Time_Sin" not in df.columns
+    needs_time_cos = "Time_Cos" in feature_cols and "Time_Cos" not in df.columns
+    if not (needs_time_sin or needs_time_cos):
+        return df
+
+    dt_series = None
+    if isinstance(df.index, pd.DatetimeIndex):
+        dt_series = df.index.to_series(index=df.index)
+    else:
+        for candidate in ["Datetime", "datetime", "time", "Time"]:
+            if candidate in df.columns:
+                dt_series = pd.to_datetime(df[candidate], errors="coerce")
+                break
+
+    if dt_series is not None and dt_series.notna().any():
+        hours = dt_series.dt.hour + (dt_series.dt.minute / 60.0)
+        theta = 2.0 * np.pi * (hours / 24.0)
+        if needs_time_sin:
+            df["Time_Sin"] = np.sin(theta)
+        if needs_time_cos:
+            df["Time_Cos"] = np.cos(theta)
+    else:
+        # Fallback for non-datetime sources.
+        if needs_time_sin:
+            df["Time_Sin"] = 0.0
+        if needs_time_cos:
+            df["Time_Cos"] = 0.0
+    return df
+
+
+def build_model_feature_frame(strategy_df, feature_cols, asset='default'):
+    """
+    Build model feature frame for live inference.
+    Uses unified feature_engineering module to ensure consistency with training.
+    
+    Args:
+        strategy_df: DataFrame with OHLCV (expects 'close', 'volume', OHLC indicators, etc.)
+        feature_cols: Ordered list of features expected by the model (from config YAML, reordered)
+        asset: 'USDCNH', 'CORN', or 'default'
+    
+    Returns:
+        DataFrame with all feature columns present, NaN rows dropped.
+    """
+    feat_df = strategy_df.copy()
+    feat_df['Log_Returns'] = np.log(feat_df['close']).diff()
+
+    atr_slow = feat_df["ATR_Slow"].replace(0, np.nan)
+    feat_df["Vol_Ratio"] = (feat_df["ATR_Fast"] / atr_slow).replace(
+        [np.inf, -np.inf], np.nan
+    )
+
+    bb_range = (feat_df["BB_Upper"] - feat_df["BB_Lower"]).replace(0, np.nan)
+    feat_df["BB_PctB"] = ((feat_df["close"] - feat_df["BB_Lower"]) / bb_range).replace(
+        [np.inf, -np.inf], np.nan
+    )
+
+    donch_range = (feat_df["Donchian_Upper_20"] - feat_df["Donchian_Lower_20"]).replace(
+        0, np.nan
+    )
+    feat_df["Donchian_Pos_20"] = (
+        (feat_df["close"] - feat_df["Donchian_Lower_20"]) / donch_range
+    ).replace([np.inf, -np.inf], np.nan)
+
+    # Use shared feature engineering module to build full unified feature set.
+    feat_df = build_all_features(feat_df, asset=asset)
+
+    # Time_Sin/Time_Cos are passthrough features in training; ensure they exist here too.
+    feat_df = _ensure_time_cyc_features(feat_df, feature_cols)
+
+    # Fill NaN in model features with 0 (keeps all rows for warm-up and inference)
+    feat_df[feature_cols] = feat_df[feature_cols].fillna(0)
+    return feat_df
+
+
+def build_scaler_feature_frame(scaler_df, feature_cols):
+    """
+    Build scaler feature frame from prepared training CSV.
+    
+    Args:
+        scaler_df: DataFrame from prepared CSV (USDCNH_MTF_ML_ready.csv or CORN_MTF_ML_ready.csv)
+        feature_cols: List of feature column names to validate and prepare
+    
+    Returns:
+        DataFrame with features for scaler fitting (ColumnTransformer)
+    """
+    feat_df = scaler_df.copy()
+
+    # Backward compatibility for older prepared CSVs missing passthrough time features.
+    feat_df = _ensure_time_cyc_features(feat_df, feature_cols)
+
+    missing = [c for c in feature_cols if c not in feat_df.columns]
+    if missing:
+        raise ValueError(f"Scaler CSV missing feature columns: {missing}")
+
+    for col in feature_cols:
+        feat_df[col] = pd.to_numeric(feat_df[col], errors="coerce")
+
+    feat_df = feat_df.dropna(subset=feature_cols)
+    return feat_df
+
+
+def build_multi_scaler(feature_cols):
+    """
+    Build a ColumnTransformer with mixed scaling strategies, matching training pipeline.
+    
+    Different feature types require different scaling approaches:
+    - Robust: Outlier-prone features (volume, ATR-based metrics)
+    - Standard: General features (returns, indicators)
+    - MinMax: Bounded oscillators (MFI, RSI)
+    - Passthrough: Already normalized/binary features
+    
+    Args:
+        feature_cols: List of feature column names (from config YAML)
+    
+    Returns:
+        tuple: (ColumnTransformer, ordered_feature_cols)
+        ordered_feature_cols is the definitive column order that ColumnTransformer
+        will output — robust + standard + minmax + passthrough.
+    """
+    # Master lists define the canonical order within each scaler group.
+    # This MUST match transformer_perdictor/data.py exactly.
+    robust_features_all = ["Vol_Ratio", "ADX_4H", "ADX_1D", "VWAP_Dist", "Volume"]
+    standard_features_all = [
+        "Log_Returns", "AO_15m", "AO_4H", "AO_1D", "AO15_x_VolRatio", "AO_4H_Diff4",
+        "AO_1D_Diff1", "AO_15m_Diff4", "Ret_Sum_8", "Ret_Sum_16", "Donchian_Pos_20",
+        "OBV_Diff4", "MACD_Hist", "trend_macd", "momentum_ao", "trend_cci", "momentum_tsi",
+        "trend_vortex_ind_neg", "trend_vortex_ind_pos",
+    ]
+    minmax_features_all = ["MFI_20", "RSI_14", "MFI_20_Diff1", "momentum_rsi", "volatility_bbp"]
+    passthrough_features_all = ["Session_Asia", "BB_PctB", "Time_Sin", "Time_Cos", "volatility_dcp"]
+
+    # Filter to only features present in feature_cols.
+    # Iterating through the master list preserves master-list order, not YAML order.
+    feature_cols_set = set(feature_cols)  # O(1) lookup
+    robust_features = [c for c in robust_features_all if c in feature_cols_set]
+    standard_features = [c for c in standard_features_all if c in feature_cols_set]
+    minmax_features = [c for c in minmax_features_all if c in feature_cols_set]
+    passthrough_features = [c for c in passthrough_features_all if c in feature_cols_set]
+
+    # Canonical output order: must match ColumnTransformer output order exactly
+    ordered_feature_cols = robust_features + standard_features + minmax_features + passthrough_features
+
+    multi_scaler = ColumnTransformer(
+        transformers=[
+            ("robust", RobustScaler(), robust_features),
+            ("standard", StandardScaler(), standard_features),
+            ("minmax", MinMaxScaler(feature_range=(0, 1)), minmax_features),
+            ("pass", "passthrough", passthrough_features),
+        ],
+        remainder="drop",
+    )
+
+    return multi_scaler, ordered_feature_cols
+
+class LiveModelRunner:
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.contexts = {}
+        self.error_history = {}
+        self.status = {}
+        self.model_feature_cols = {}  # Track per-asset feature columns
+        self.model_configs = {}  # Store config params per asset
+        self._load_contexts()
+
+    def _load_config(self, asset, config_path):
+        """Load YAML config and extract model/data parameters."""
+        import yaml
+        try:
+            with open(config_path, 'r') as f:
+                cfg = yaml.safe_load(f)
+            return cfg
+        except Exception as e:
+            print(f"[WARNING] Failed to load config for {asset}: {e}")
+            # Return defaults if config load fails
+            return {
+                'data': {'sequence_length': 96, 'feature_cols': []},
+                'model': {
+                    'd_model': 32,
+                    'nhead': 2,
+                    'num_layers': 2,
+                    'dropout': 0.4,
+                    'error_history_len': 96,
+                    'patch_len': 8,
+                    'patch_stride': 4,
+                }
+            }
+
+    def _warm_up_error_history(self, asset, strategy_df, model, scaler, feature_cols, cfg):
+        """Warm up the error history with predictions on initial data.
+        
+        This prevents using all-zero error states which can bias early predictions.
+        """
+        print(f"  [WARMUP] Initializing error history for {asset}...")
+        seq_len = cfg['data']['sequence_length']
+        error_history_len = cfg['model']['error_history_len']
+        error_history = [0.0] * error_history_len
+        
+        # Use tail of strategy_df for warm-up predictions
+        # We need at least seq_len rows to make a prediction
+        available_rows = len(strategy_df)
+        if available_rows < seq_len:
+            print(f"  [WARMUP] Insufficient data for warm-up (need {seq_len}, got {available_rows})")
+            return error_history
+        
+        # Start warm-up from seq_len rows and iterate through remaining data
+        num_warmup_steps = min(available_rows - seq_len, error_history_len)
+        print(f"  [WARMUP] Running {num_warmup_steps} warm-up steps...")
+        
+        for i in range(num_warmup_steps):
+            start_idx = available_rows - seq_len - num_warmup_steps + i
+            end_idx = start_idx + seq_len
+            
+            # Extract window
+            window_df = strategy_df[feature_cols].iloc[start_idx:end_idx]
+            window_scaled = scaler.transform(window_df)
+            
+            x = torch.tensor(window_scaled, dtype=torch.float32, device=self.device).unsqueeze(0)
+            error_state = torch.tensor(error_history, dtype=torch.float32, device=self.device).unsqueeze(0)
+            
+            with torch.no_grad():
+                (mu_15m, sigma_15m), (mu_1h, sigma_1h), (mu_4h, sigma_4h) = model(x, error_state)
+            
+            direction_prob = float(mu_15m.squeeze().item())
+            
+            # --- THE FIX: TRUE HISTORICAL ERROR ---
+            # The model just predicted the bar at 'end_idx' based on data up to 'end_idx - 1'
+            # Because this is historical warm-up, we actually HAVE the bar at 'end_idx'!
+            last_close = strategy_df['close'].iloc[end_idx - 1]
+            future_close = strategy_df['close'].iloc[end_idx]
+            
+            actual_target = 1.0 if future_close > last_close else 0.0
+            real_error = actual_target - direction_prob
+            
+            # Update error history with reality
+            error_history = error_history[1:] + [float(real_error)]
+        
+        print(f"  [WARMUP] Complete. Error history range: [{min(error_history):.4f}, {max(error_history):.4f}]")
+        self.contexts[asset]["last_predicted_prob"] = direction_prob
+        return error_history
+
+    def _load_contexts(self):
+        for asset, cfg_dict in MODEL_RUNTIME_CONFIG.items():
+            try:
+                model_path = cfg_dict["model_path"]
+                scaler_csv = cfg_dict["scaler_csv"]
+                config_file = cfg_dict.get("config_file")
+
+                if not os.path.exists(model_path):
+                    self.status[asset] = f"Model missing: {model_path}"
+                    continue
+                if not os.path.exists(scaler_csv):
+                    self.status[asset] = f"Scaler csv missing: {scaler_csv}"
+                    continue
+
+                # Load training config to get model architecture params
+                if config_file and os.path.exists(config_file):
+                    cfg = self._load_config(asset, config_file)
+                    self.model_configs[asset] = cfg
+                else:
+                    # Use defaults
+                    cfg = {
+                        'data': {'sequence_length': 96, 'feature_cols': []},
+                        'model': {
+                            'd_model': 32,
+                            'nhead': 2,
+                            'num_layers': 2,
+                            'dropout': 0.4,
+                            'error_history_len': 96,
+                            'patch_len': 8,
+                            'patch_stride': 4,
+                        }
+                    }
+                    self.model_configs[asset] = cfg
+
+                # Get feature columns directly from config YAML (same as training)
+                feature_cols_from_config = cfg['data']['feature_cols']
+                if not feature_cols_from_config:
+                    self.status[asset] = "No feature_cols in config file"
+                    continue
+
+                # Load and prepare scaler
+                scaler_df = pd.read_csv(scaler_csv)
+                scaler_df = build_scaler_feature_frame(scaler_df, feature_cols=feature_cols_from_config)
+                
+                # Build multi-scaler: returns (ColumnTransformer, ordered_feature_cols)
+                # ordered_feature_cols is the canonical group order: robust+standard+minmax+passthrough
+                multi_scaler, feature_cols_ordered = build_multi_scaler(feature_cols_from_config)
+
+                # Verify no features from config are lost (not assigned to any scaler group)
+                forgotten_features = [c for c in feature_cols_from_config if c not in feature_cols_ordered]
+                if forgotten_features:
+                    raise ValueError(f"CRITICAL: Features {forgotten_features} not in any scaler group!")
+
+                # Store the ordered feature_cols (this is what we'll use for inference)
+                self.model_feature_cols[asset] = feature_cols_ordered
+
+                # Fit the multi-scaler with ordered features
+                multi_scaler.fit(scaler_df[feature_cols_ordered])
+                scaler = multi_scaler
+
+                print(f"[SCALER:{asset}] Feature order: {len(feature_cols_ordered)} features: {feature_cols_ordered}")
+
+                # Get model architecture params from config
+                seq_len = cfg['data']['sequence_length']
+                model_cfg = cfg['model']
+                d_model = model_cfg.get('d_model', 32)
+                nhead = model_cfg.get('nhead', 2)
+                num_layers = model_cfg.get('num_layers', 2)
+                dropout = model_cfg.get('dropout', 0.4)
+                error_history_len = model_cfg.get('error_history_len', 96)
+                patch_len = model_cfg.get('patch_len', 8)
+                patch_stride = model_cfg.get('patch_stride', 4)
+
+                # Create model with proper architecture
+                model = USDCNHTransformer(
+                    input_size=len(feature_cols_ordered),
+                    seq_len=seq_len,
+                    error_history_len=error_history_len,
+                    d_model=d_model,
+                    nhead=nhead,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    patch_len=patch_len,
+                    patch_stride=patch_stride,
+                ).to(self.device)
+
+                state_dict = torch.load(model_path, map_location=self.device)
+                model.load_state_dict(state_dict, strict=True)
+                model.eval()
+
+                # Load calibration temperature (T=1.0 fallback if file absent)
+                T_path = model_path + ".T.pt"
+                if os.path.exists(T_path):
+                    T_val = torch.load(T_path, map_location="cpu")["T"]
+                else:
+                    T_val = 1.0
+
+                self.contexts[asset] = {
+                    "model": model,
+                    "scaler": scaler,
+                    "T": float(T_val),
+                    "seq_len": seq_len,
+                    "error_history_len": error_history_len,
+                }
+                
+                # Initialize error history (will be warm-up'd on first real data)
+                self.error_history[asset] = [0.0] * error_history_len
+                
+                self.status[asset] = (
+                    f"Loaded ({model_path}) | features: {len(feature_cols_ordered)} "
+                    f"| error_len: {error_history_len} | patch_len: {patch_len} | patch_stride: {patch_stride}"
+                )
+            except Exception as e:
+                self.status[asset] = f"Load failed: {e}"
+
+    def predict(self, asset, strategy_df):
+        if asset not in self.contexts:
+            return {"error": self.status.get(asset, "Model not configured")}
+
+        try:
+            # Use feature_cols that were set during model loading (already reordered to match training)
+            feature_cols = self.model_feature_cols.get(asset)
+            if not feature_cols:
+                return {"error": f"Feature columns not configured for {asset}"}
+            
+            feat_df = build_model_feature_frame(strategy_df, feature_cols=feature_cols, asset=asset)
+            
+            seq_len = self.contexts[asset]["seq_len"]
+            
+            # 1. Check if we have enough data
+            if len(feat_df) < seq_len + 1: # +1 because we need previous bars to check real errors!
+                return {"error": f"Need {seq_len + 1} feature rows, got {len(feat_df)}"}
+                
+            # 2. Trigger Warm-up ONCE
+            warmup_key = f"{asset}_warmed_up"
+            just_warmed_up = False  # <--- NEW FLAG
+            
+            if not self.status.get(warmup_key, False):
+                self.error_history[asset] = self._warm_up_error_history(
+                    asset, feat_df, self.contexts[asset]["model"],
+                    self.contexts[asset]["scaler"], feature_cols, self.model_configs[asset]
+                )
+                self.status[warmup_key] = True
+                just_warmed_up = True  # <--- SET FLAG
+
+            # Extract sequence window as DataFrame to preserve column names for ColumnTransformer
+            window_df = feat_df[feature_cols].tail(seq_len)
+            window_scaled = self.contexts[asset]["scaler"].transform(window_df)
+            x = (
+                torch.tensor(window_scaled, dtype=torch.float32, device=self.device)
+                .unsqueeze(0)
+            )
+            
+            # Use current error history
+            error_state = torch.tensor(self.error_history[asset], dtype=torch.float32, device=self.device).unsqueeze(0)
+
+            with torch.no_grad():
+                (mu_15m, sigma_15m), (mu_1h, sigma_1h), (mu_4h, sigma_4h) = (
+                    self.contexts[asset]["model"](x, error_state)
+                )
+
+            direction_prob = float(mu_15m.squeeze().item())
+            direction = "LONG" if direction_prob >= 0.5 else "SHORT"
+            
+            # --- THE FIX: ONLY UPDATE IF NOT JUST WARMED UP ---
+            if not just_warmed_up:
+                # We look at the last two rows to see if the price actually went up or down
+                last_close = feat_df['close'].iloc[-2]
+                current_close = feat_df['close'].iloc[-1]
+                actual_direction_target = 1.0 if current_close > last_close else 0.0
+                
+                # Retrieve the probability the model PREDICTED one step ago
+                last_predicted_prob = self.contexts[asset].get("last_predicted_prob", 0.5)
+                
+                # Calculate the TRUE autoregressive error!
+                realized_error = actual_direction_target - last_predicted_prob
+                
+                # Update the history BEFORE making the new prediction
+                self.error_history[asset] = update_error_history_live(
+                    self.error_history[asset], realized_error
+                )
+                
+                # Re-create the error_state tensor because we just updated the history array!
+                error_state = torch.tensor(self.error_history[asset], dtype=torch.float32, device=self.device).unsqueeze(0)
+            # -----------------------------------------------------------
+
+            with torch.no_grad():
+                (mu_15m, sigma_15m), (mu_1h, sigma_1h), (mu_4h, sigma_4h) = (
+                    self.contexts[asset]["model"](x, error_state)
+                )
+
+            direction_prob = float(mu_15m.squeeze().item())
+            
+            # STORE THIS PREDICTION so we can check it against reality on the NEXT bar!
+            self.contexts[asset]["last_predicted_prob"] = direction_prob
+
+            return {
+                "direction": direction,
+                "direction_prob": direction_prob,
+                "mu_15m": float(mu_15m.squeeze().item()),
+                "sigma_15m": float(sigma_15m.squeeze().item()),
+                "mu_1h": float(mu_1h.squeeze().item()),
+                "sigma_1h": float(sigma_1h.squeeze().item()),
+                "mu_4h": float(mu_4h.squeeze().item()),
+                "sigma_4h": float(sigma_4h.squeeze().item()),
+            }
+        except Exception as e:
+            return {"error": f"Inference failed: {e}"}
 
 
 # ==========================================
@@ -374,6 +863,7 @@ def build_multi_timeframe_features(df_15m, df_4h, df_1d):
         "ADX_4H",
         "AO_1D",
         "AO_4H",
+        "AO_15m",
         "MFI_10",
         "ATR_Fast",
         "BB_Lower",
@@ -802,8 +1292,29 @@ def update_mt5_dashboard(symbol_snapshots):
             cooldown_info += f" (Bar #{signal_tracker.signal_bar_count})"
         text += f"Cooldown  : {cooldown_info}\n"
 
-        action_text = signal_msg if signal_msg else "SCANNING..."
-        text += f"Action    : {action_text}\n"
+        model_inference = snapshot.get("model_inference")
+        if model_inference:
+            if "error" in model_inference:
+                text += f"ML Model  : {model_inference['error']}\n"
+            else:
+                def _sig_tag(s):
+                    return "sure" if s < 0.20 else ("ok" if s < 0.40 else "unsure")
+                text += (
+                    f"ML Signal : {model_inference['direction']} "
+                    f"(p={model_inference['direction_prob']:.3f})\n"
+                )
+                text += (
+                    f"ML 15m    : mu={model_inference['mu_15m']:+.4f}, "
+                    f"sigma={model_inference['sigma_15m']:.4f} [{_sig_tag(model_inference['sigma_15m'])}]\n"
+                )
+                text += (
+                    f"ML 1H     : mu={model_inference['mu_1h']:+.4f}, "
+                    f"sigma={model_inference['sigma_1h']:.4f} [{_sig_tag(model_inference['sigma_1h'])}]\n"
+                )
+                text += (
+                    f"ML 4H     : mu={model_inference['mu_4h']:+.4f}, "
+                    f"sigma={model_inference['sigma_4h']:.4f} [{_sig_tag(model_inference['sigma_4h'])}]\n"
+                )
         text += "----------------------------------------\n"
 
         panel_lines.append(f"Local Time: {local_time_str}")
@@ -834,6 +1345,26 @@ def update_mt5_dashboard(symbol_snapshots):
             f"Donch L20/U10: {latest_state['Donchian_Lower_20']:.5f} / {latest_state['Donchian_Upper_10']:.5f}"
         )
         panel_lines.append(f"Cooldown : {cooldown_info}")
+
+        if model_inference:
+            if "error" in model_inference:
+                panel_lines.append(f"ML       : {model_inference['error']}")
+            else:
+                def _sig_tag(s):
+                    return "sure" if s < 0.20 else ("ok" if s < 0.40 else "unsure")
+                panel_lines.append(
+                    f"ML Sig   : {model_inference['direction']} (p={model_inference['direction_prob']:.3f})"
+                )
+                panel_lines.append(
+                    f"ML 15m   : mu={model_inference['mu_15m']:+.4f} σ={model_inference['sigma_15m']:.4f} [{_sig_tag(model_inference['sigma_15m'])}]"
+                )
+                panel_lines.append(
+                    f"ML 1H    : mu={model_inference['mu_1h']:+.4f} σ={model_inference['sigma_1h']:.4f} [{_sig_tag(model_inference['sigma_1h'])}]"
+                )
+                panel_lines.append(
+                    f"ML 4H    : mu={model_inference['mu_4h']:+.4f} σ={model_inference['sigma_4h']:.4f} [{_sig_tag(model_inference['sigma_4h'])}]"
+                )
+
         panel_lines.append(f"Action   : {action_text}")
 
         panel_text = "\n".join(panel_lines)
@@ -956,6 +1487,10 @@ def main():
         f"[{datetime.now()}] === Quant Engine Started -> Targets: {active_symbols} ==="
     )
 
+    model_runner = LiveModelRunner()
+    for asset, status in model_runner.status.items():
+        print(f"[ML:{asset}] {status}")
+
     last_processed_time = {symbol: None for symbol in active_symbols}
     signal_trackers = {symbol: SignalTracker() for symbol in active_symbols}
     raw_cache = {symbol: None for symbol in active_symbols}
@@ -965,15 +1500,32 @@ def main():
     is_running = True
 
     def upsert_raw_cache(symbol):
-        """Maintain a rolling M15 cache instead of re-fetching huge history every cycle."""
+        """Maintain a rolling M15 cache, fetching only bars newer than the last cached bar."""
         if raw_cache[symbol] is None:
             df_seed = get_mt5_data(symbol, mt5.TIMEFRAME_M15, M15_HISTORY_BARS)
             raw_cache[symbol] = df_seed
             return raw_cache[symbol]
 
-        df_new = get_mt5_data(symbol, mt5.TIMEFRAME_M15, M15_INCREMENT_BARS)
-        if df_new is None or len(df_new) == 0:
+        # Anchor fetch to the last bar's timestamp so there are no gaps or overlaps.
+        last_ts = raw_cache[symbol].index[-1]
+        # copy_rates_range is inclusive on both ends; add 1 second to exclude the
+        # already-cached last bar, then fetch up to now + a small buffer.
+        from_dt = last_ts + pd.Timedelta(seconds=1)
+        to_dt = pd.Timestamp.utcnow() + pd.Timedelta(minutes=20)
+        rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M15, from_dt, to_dt)
+        if rates is None or len(rates) == 0:
             return raw_cache[symbol]
+
+        df_new = pd.DataFrame(rates)
+        df_new["time"] = pd.to_datetime(df_new["time"], unit="s")
+        df_new.set_index("time", inplace=True)
+        if "tick_volume" in df_new.columns:
+            df_new.rename(columns={"tick_volume": "volume"}, inplace=True)
+        elif "real_volume" in df_new.columns:
+            df_new["volume"] = df_new["real_volume"]
+        else:
+            df_new["volume"] = 1.0
+        df_new.sort_index(inplace=True)
 
         merged = pd.concat([raw_cache[symbol], df_new])
         merged = merged[~merged.index.duplicated(keep="last")]
@@ -1073,6 +1625,19 @@ def main():
                     if signal_msg:
                         print(f">>> {signal_msg}")
 
+                    asset_key = infer_asset_key(symbol)
+                    model_inference = model_runner.predict(asset_key, strategy_data)
+                    if "error" in model_inference:
+                        print(f"[ML:{symbol}] {model_inference['error']}")
+                    else:
+                        print(
+                            f"[ML:{symbol}] {model_inference['direction']} "
+                            f"mu_15m={model_inference['direction_prob']:.4f} | "
+                            f"15m mu={model_inference['mu_15m']:+.4f} σ={model_inference['sigma_15m']:.4f} | "
+                            f"1H mu={model_inference['mu_1h']:+.4f} σ={model_inference['sigma_1h']:.4f} | "
+                            f"4H mu={model_inference['mu_4h']:+.4f} σ={model_inference['sigma_4h']:.4f}"
+                        )
+
                     symbol_snapshots[symbol] = {
                         "bar_time": latest_state.name,
                         "market_regime": market_regime,
@@ -1080,6 +1645,7 @@ def main():
                         "latest_state": latest_state,
                         "current_price": current_price,
                         "signal_tracker": signal_trackers[symbol],
+                        "model_inference": model_inference,
                     }
 
                     last_processed_time[symbol] = current_bar_time

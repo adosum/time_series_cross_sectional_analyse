@@ -1,0 +1,89 @@
+seed: 42
+
+data:
+  csv_file: "USDCNH_MTF_ML_ready.csv"
+  feature_cols:
+    - Log_Returns
+    - AO_15m
+    - MFI_20
+    - Vol_Ratio
+    - BB_PctB
+    - Donchian_Pos_20
+    - ADX_4H
+    - AO_4H
+    - ADX_1D
+    - AO_1D
+    - AO15_x_VolRatio
+    - AO_4H_Diff4
+    - AO_1D_Diff1
+    - AO_15m_Diff4
+    - Ret_Sum_8
+    - Ret_Sum_16
+    - Session_Asia
+    - MFI_20_Diff1
+    - Volume
+    - RSI_14
+    - MACD_Hist
+    - VWAP_Dist
+    - OBV_Diff4
+  train_ratio: 0.70
+  val_ratio: 0.85
+  sequence_length: 10
+
+model:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dropout: 0.2
+  error_history_len: 4
+
+rl:
+  # PPO optimization
+  # Reward mode:
+  # - target_scaled: legacy mode based on normalized Target in [0,1]
+  # - next_log_return: realistic mode using next-bar Log_Returns
+  reward_mode: "next_log_return"
+  # Scale and optional clip for next_log_return mode only.
+  reward_scale: 1.0
+  reward_clip_abs: 0.02
+  total_timesteps: 500000
+  rollout_steps: 2048
+  update_epochs: 4
+  minibatch_size: 256
+  lr: 0.00003
+  weight_decay: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.15
+  entropy_coef: 0.02
+  value_coef: 0.5
+  max_grad_norm: 0.5
+
+  # Position-size action space (4 bins, no flat — forces directional learning)
+  # Add 0.0 back only after agent has learned directional signal.
+  position_values: [-1.0, -0.5, 0.5, 1.0]
+
+  # Trading environment
+  initial_capital: 10000.0
+  trading_cost: 0.0004
+  spread_cost: 0.0002
+  slippage_cost: 0.0001
+  # Keep penalty small at first; 0.5 makes any wrong trade penalized 50% extra,
+  # overwhelming the signal and causing collapse to flat.
+  drawdown_penalty_coef: 0.05
+  max_episode_steps: 512
+  # Chronological train feed controls:
+  # - train_random_start=false -> do not jump to random windows
+  # - train_max_episode_steps=0 -> auto use full train timeline per episode
+  train_random_start: false
+  train_max_episode_steps: 0
+
+  # Evaluation/checkpoint
+  eval_every_updates: 5
+  early_stop_patience_evals: 20
+  early_stop_min_delta: 0.00001
+  init_from_supervised_path: "cnh_best_transformer_model.pth"
+  model_save_path: "cnh_rl_transformer_ppo.pth"
+  metrics_csv: "rl_training_metrics.csv"
+  test_reward_plot_png: "rl_test_reward_plot.png"
+  val_reward_plot_png: "rl_val_reward_plot.png"

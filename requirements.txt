@@ -18,5 +18,8 @@ torch==2.11.0+cu128
 scikit-learn
 # Progress bars
 tqdm
+# YAML config management
+pyyaml
 # Technical analysis indicators
 ta
+optuna  

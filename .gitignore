@@ -4,3 +4,6 @@
 /.idea/
 .venv/
 .devcontainer/
+__pycache__/
+*.pyc
+results/

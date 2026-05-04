@@ -1,0 +1,175 @@
+seed: 42
+
+# Training mode: choose which training pipeline(s) to run.
+# Options:
+#   "pure" - two-stage single-model training (Stage 1 batch + Stage 2 sequential)
+#   "pbt"  - Population-Based Training (evolutionary HP search)
+#   "both" - run pure training first, then PBT
+training_mode: "pure"
+
+data:
+  csv_file: "CORN_MTF_ML_ready.csv"
+  feature_cols:
+    # High-score features (ta_ prefix removed to match normalized feature names)
+    - volatility_dcp
+    - Donchian_Pos_20
+    - Ret_Sum_16
+    - momentum_rsi
+    - volatility_bbp
+    - BB_PctB
+    - momentum_ao
+    - trend_cci
+    - AO_15m
+    - momentum_tsi
+    - trend_macd
+
+    # Keep baseline return feature
+    - Log_Returns
+
+    # Optional candidates (currently commented out due lower score / not selected)
+    # - momentum_ppo
+    # - MFI_20
+    # - Vol_Ratio
+    # - ADX_4H
+    # - AO_4H
+    # - ADX_1D
+    # - AO_1D
+    # - AO15_x_VolRatio
+    # - AO_4H_Diff4
+    # - AO_1D_Diff1
+    # - AO_15m_Diff4
+    # - Ret_Sum_8
+    - Time_Sin
+    - Time_Cos
+    # - MFI_20_Diff1
+    # - Volume
+    # - StochK_14
+    # - OBV_Diff4
+    # - VolRank_2W
+  train_ratio: 0.70
+  val_ratio: 0.85
+  sequence_length: 96
+
+augmentation:
+  default_noise_std_by_tf:
+    "15m": 0.0200
+    "4H":  0.0150
+    "1D":  0.0150
+  noise_std_by_symbol:
+    CORN:
+      "15m": 0.0196
+      "4H":  0.0150
+      "1D":  0.0150
+    USDCNH:
+      "15m": 0.0201
+      "4H":  0.0150
+      "1D":  0.0150
+  mask_prob_by_tf:
+    "15m": 0.08
+    "4H":  0.12
+    "1D":  0.12
+
+model:
+  d_model: 32
+  nhead: 4
+  num_layers: 1
+  dropout: 0.5
+  patch_len: 4
+  patch_stride: 2
+  error_history_len: 96
+  model_save_path: corn_best_transformer_model.pth
+  
+
+training:
+  batch_size: 256
+  epochs: 500
+  lr: 0.000875
+  weight_decay: 0.000445
+  stage1_shuffle: true
+  grad_clip_max_norm: 1.0
+  val_freq: 5
+  abs_loss_weight: 0.20
+  volatility_loss_weight: 50.0
+  trend_loss_weight: 1.0
+  confidence_loss_weight: 0.50
+  # If true, use UncertaintyLoss (learned log-variance weighting) to combine tasks.
+  # If false, use the fixed weights above to compute a weighted sum.
+  use_uncertainty_loss: true
+  # stage1_epochs + (epochs - stage1_epochs) = epochs total
+  stage1_epochs: 300
+  stage2:
+    lr: 0.000038
+    grad_accum_steps: 32
+    weight_decay: 0.000136
+    early_stop_enabled: true
+    early_stop_patience: 8
+    early_stop_min_delta: 0.0005
+# Optional hyperparameter sweep runner.
+# Leave enabled=false for normal single-run behavior.
+sweep:
+  enabled: true
+  n_trials: 40      
+  method: bayes
+  metric:
+    name: val_loss
+    goal: minimize
+  params:
+    # ------------------------------------------------
+    # 1. ARCHITECTURE (The Brain)
+    # ------------------------------------------------
+    model.d_model: 
+      values: [32, 64]
+    model.nhead: 
+      values: [2, 4]
+    model.num_layers: 
+      values: [1, 2]
+    model.dropout: 
+      values: [0.3, 0.5]
+    model.patch_len: 
+      values: [4, 8]
+    model.patch_stride: 
+      values: [2, 4]
+
+    # ------------------------------------------------
+    # 2. STAGE 1 DYNAMICS (The Excavator)
+    # Goal: Learn the core market physics from scratch.
+    # ------------------------------------------------
+    stage1.lr: 
+      low: 0.0005      # 5e-4
+      high: 0.005      # 5e-3
+      log: true
+    stage1.weight_decay:
+      low: 0.00001
+      high: 0.01
+      log: true
+
+    # ------------------------------------------------
+    # 3. STAGE 2 DYNAMICS (The Scalpel)
+    # Goal: Autoregressive calibration without forgetting.
+    # ------------------------------------------------
+    stage2.lr: 
+      low: 0.00001     # 1e-5 (Strictly bounded to be small)
+      high: 0.0005     # 5e-4 
+      log: true
+    stage2.weight_decay:
+      low: 0.00001
+      high: 0.01
+      log: true
+
+pbt:
+  population_size: 10
+  generations: 10
+  epochs_per_gen: 60
+  lr_min: 0.00001
+  lr_max: 0.0003
+  dropout_min: 0.05
+  dropout_max: 0.20
+  wd_min: 0.00001
+  wd_max: 0.0001
+  weight_copy_ratio: 0.20
+  stage2_lr_factor: 0.5
+  # Fraction of train samples used in PBT Stage 2 each generation (1.0 = full set)
+  stage2_sample_ratio: 1.0
+  # Enable AMP in PBT Stage 2 sequential loop
+  stage2_use_amp: true
+  confidence_loss_weight: 0.50
