@@ -23,6 +23,35 @@ from ta.volume import MFIIndicator
 # Import unified feature engineering module
 from feature_engineering import build_all_features, get_feature_cols
 
+def normalize_state_dict_keys(state_dict: dict) -> dict:
+    """Normalize known wrapper prefixes (e.g., torch.compile) for robust loading."""
+    normalized = state_dict
+    prefixes = ("_orig_mod.", "module.")
+    for prefix in prefixes:
+        if all(isinstance(k, str) and k.startswith(prefix) for k in normalized.keys()):
+            normalized = {k[len(prefix):]: v for k, v in normalized.items()}
+    return normalized
+
+def load_state_dict_compat(
+    model: torch.nn.Module,
+    state_dict: dict,
+    strict: bool = True,
+) -> None:
+    """Load checkpoints that may come from wrapped/compiled modules."""
+    normalized = normalize_state_dict_keys(state_dict)
+
+    # torch.compile wraps the real module in OptimizedModule; load into the
+    # underlying original model to avoid key namespace mismatches.
+    target_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+
+    try:
+        target_model.load_state_dict(normalized, strict=strict)
+        return
+    except RuntimeError:
+        # Fallback for legacy checkpoints that may already match target namespace.
+        pass
+
+    target_model.load_state_dict(state_dict, strict=strict)
 
 class FloatingHUD:
     def __init__(self):
@@ -358,6 +387,8 @@ def build_multi_scaler(feature_cols):
     ]
     minmax_features_all = ["MFI_20", "RSI_14", "MFI_20_Diff1", "momentum_rsi", "volatility_bbp"]
     passthrough_features_all = ["Session_Asia", "BB_PctB", "Time_Sin", "Time_Cos", "volatility_dcp"]
+    # OHLC columns are passthrough in training (RevIN handles normalization in-model).
+    ohlc_features_all = ["Open", "High", "Low", "Close"]
 
     # Filter to only features present in feature_cols.
     # Iterating through the master list preserves master-list order, not YAML order.
@@ -366,9 +397,10 @@ def build_multi_scaler(feature_cols):
     standard_features = [c for c in standard_features_all if c in feature_cols_set]
     minmax_features = [c for c in minmax_features_all if c in feature_cols_set]
     passthrough_features = [c for c in passthrough_features_all if c in feature_cols_set]
+    ohlc_features = [c for c in ohlc_features_all if c in feature_cols_set]
 
     # Canonical output order: must match ColumnTransformer output order exactly
-    ordered_feature_cols = robust_features + standard_features + minmax_features + passthrough_features
+    ordered_feature_cols = robust_features + standard_features + minmax_features + passthrough_features + ohlc_features
 
     multi_scaler = ColumnTransformer(
         transformers=[
@@ -376,6 +408,7 @@ def build_multi_scaler(feature_cols):
             ("standard", StandardScaler(), standard_features),
             ("minmax", MinMaxScaler(feature_range=(0, 1)), minmax_features),
             ("pass", "passthrough", passthrough_features),
+            ("ohlc", "passthrough", ohlc_features),
         ],
         remainder="drop",
     )
@@ -555,7 +588,7 @@ class LiveModelRunner:
                 ).to(self.device)
 
                 state_dict = torch.load(model_path, map_location=self.device)
-                model.load_state_dict(state_dict, strict=True)
+                load_state_dict_compat(model, state_dict, strict=True)
                 model.eval()
 
                 # Load calibration temperature (T=1.0 fallback if file absent)
@@ -624,14 +657,6 @@ class LiveModelRunner:
             # Use current error history
             error_state = torch.tensor(self.error_history[asset], dtype=torch.float32, device=self.device).unsqueeze(0)
 
-            with torch.no_grad():
-                (mu_15m, sigma_15m), (mu_1h, sigma_1h), (mu_4h, sigma_4h) = (
-                    self.contexts[asset]["model"](x, error_state)
-                )
-
-            direction_prob = float(mu_15m.squeeze().item())
-            direction = "LONG" if direction_prob >= 0.5 else "SHORT"
-            
             # --- THE FIX: ONLY UPDATE IF NOT JUST WARMED UP ---
             if not just_warmed_up:
                 # We look at the last two rows to see if the price actually went up or down
@@ -660,6 +685,8 @@ class LiveModelRunner:
                 )
 
             direction_prob = float(mu_15m.squeeze().item())
+            # mu_15m is a raw return prediction; positive => LONG (threshold = 0).
+            direction = "LONG" if direction_prob >= 0 else "SHORT"
             
             # STORE THIS PREDICTION so we can check it against reality on the NEXT bar!
             self.contexts[asset]["last_predicted_prob"] = direction_prob
@@ -1300,10 +1327,6 @@ def update_mt5_dashboard(symbol_snapshots):
                 def _sig_tag(s):
                     return "sure" if s < 0.20 else ("ok" if s < 0.40 else "unsure")
                 text += (
-                    f"ML Signal : {model_inference['direction']} "
-                    f"(p={model_inference['direction_prob']:.3f})\n"
-                )
-                text += (
                     f"ML 15m    : mu={model_inference['mu_15m']:+.4f}, "
                     f"sigma={model_inference['sigma_15m']:.4f} [{_sig_tag(model_inference['sigma_15m'])}]\n"
                 )
@@ -1364,8 +1387,6 @@ def update_mt5_dashboard(symbol_snapshots):
                 panel_lines.append(
                     f"ML 4H    : mu={model_inference['mu_4h']:+.4f} σ={model_inference['sigma_4h']:.4f} [{_sig_tag(model_inference['sigma_4h'])}]"
                 )
-
-        panel_lines.append(f"Action   : {action_text}")
 
         panel_text = "\n".join(panel_lines)
         if "USDCNH" in symbol.upper():

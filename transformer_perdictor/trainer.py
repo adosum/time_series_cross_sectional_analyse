@@ -650,14 +650,16 @@ def run_pure_training(cfg, run_paths, data, device):
         test_nll_4h = _avg_metric(total_test_nll_4h, total_test_count)
         test_loss = _avg_metric(total_test_loss, total_test_count)
 
-        # Get binary targets for all three horizons
-        target_binary_15m = (data.y_test_tensor[warmup_steps_test:, 0] > 0.5).float().to(device)
-        target_binary_1h = (data.y_test_tensor[warmup_steps_test:, 1] > 0.5).float().to(device)
-        target_binary_4h = (data.y_test_tensor[warmup_steps_test:, 2] > 0.5).float().to(device)
+        # Get binary targets for all three horizons.
+        # Targets are raw returns, so the decision boundary is 0 (positive return = LONG).
+        target_binary_15m = (data.y_test_tensor[warmup_steps_test:, 0] > 0).float().to(device)
+        target_binary_1h = (data.y_test_tensor[warmup_steps_test:, 1] > 0).float().to(device)
+        target_binary_4h = (data.y_test_tensor[warmup_steps_test:, 2] > 0).float().to(device)
 
         # Helper function to compute accuracy metrics for a given horizon
         def compute_horizon_metrics(mu, sig, target_binary, horizon_name):
-            binary_predictions = (mu > 0.5).float()
+            # mu predicts a raw return; positive return => LONG (threshold = 0).
+            binary_predictions = (mu > 0).float()
             test_confidence = torch.exp(-sig)
             
             correct = (binary_predictions == target_binary).sum().item()
