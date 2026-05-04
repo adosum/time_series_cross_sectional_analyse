@@ -120,6 +120,8 @@ def run_pure_training(cfg, run_paths, data, device):
         epoch_count = 0
 
         for batch_X, batch_y in data.train_loader:
+            batch_X = batch_X.to(device, non_blocking=True)
+            batch_y = batch_y.to(device, non_blocking=True)
             batch_size_current = batch_X.shape[0]
             y_15m = batch_y[:, 0]
             y_1h  = batch_y[:, 1]
@@ -184,6 +186,8 @@ def run_pure_training(cfg, run_paths, data, device):
                 total_val_count = 0
 
                 for batch_X_val, batch_y_val in data.val_loader:
+                    batch_X_val = batch_X_val.to(device, non_blocking=True)
+                    batch_y_val = batch_y_val.to(device, non_blocking=True)
                     batch_size_val = batch_X_val.shape[0]
                     y_val_15m = batch_y_val[:, 0]
                     y_val_1h  = batch_y_val[:, 1]
@@ -353,8 +357,8 @@ def run_pure_training(cfg, run_paths, data, device):
                     continue
 
                 valid_indices = [raw_indices[lane] for lane in valid_lanes]
-                X_seq_w = X_train_stage2[valid_indices]
-                y_seq_w = y_train_stage2[valid_indices]
+                X_seq_w = X_train_stage2[valid_indices].to(device, non_blocking=True)
+                y_seq_w = y_train_stage2[valid_indices].to(device, non_blocking=True)
 
                 # No data augmentation during warmup! We want real history.
                 lane_tensor = torch.tensor(valid_lanes, device=device, dtype=torch.long)
@@ -385,8 +389,8 @@ def run_pure_training(cfg, run_paths, data, device):
             # ⭐️ Apply the random offset to our index gathering!
             indices = [start_offset + b * chunk_len + t for b in range(parallel_streams)]
 
-            X_seq = X_train_stage2[indices]
-            y_val = y_train_stage2[indices]
+            X_seq = X_train_stage2[indices].to(device, non_blocking=True)
+            y_val = y_train_stage2[indices].to(device, non_blocking=True)
 
             X_aug = augment_financial_data(
                 X_seq, noise_std=data.feature_noise_std, mask_prob=data.feature_mask_prob
@@ -456,8 +460,8 @@ def run_pure_training(cfg, run_paths, data, device):
                 warmup_steps = min(error_history_len, len(data.X_val_tensor) - 1)
 
                 for i in range(warmup_steps):
-                    X_seq = data.X_val_tensor[i : i + 1]
-                    y_15m_seq = data.y_val_tensor[i, 0].item()
+                    X_seq = data.X_val_tensor[i : i + 1].to(device, non_blocking=True)
+                    y_15m_seq = data.y_val_tensor[i, 0].to(device, non_blocking=True).item()
 
                     error_state_val = torch.tensor([val_error_history], dtype=X_seq.dtype, device=device)
                     (mu_val, _), _, _ = model(X_seq, error_state=error_state_val)
@@ -466,8 +470,8 @@ def run_pure_training(cfg, run_paths, data, device):
                     val_error_history = update_error_history(val_error_history, newest_error)
 
                 for i in range(warmup_steps, len(data.X_val_tensor)):
-                    X_seq = data.X_val_tensor[i : i + 1]
-                    y_row = data.y_val_tensor[i]  # shape (3,)
+                    X_seq = data.X_val_tensor[i : i + 1].to(device, non_blocking=True)
+                    y_row = data.y_val_tensor[i].to(device, non_blocking=True)  # shape (3,)
                     y_15m_v = y_row[0:1]          # shape (1,)
                     y_1h_v  = y_row[1:2]
                     y_4h_v  = y_row[2:3]
@@ -583,8 +587,8 @@ def run_pure_training(cfg, run_paths, data, device):
         # ⭐️ TEST PHASE 1: WARM-UP (Do not record metrics)
         # -----------------------------------------------------------
         for i in range(warmup_steps_test):
-            X_seq = data.X_test_tensor[i : i + 1]
-            y_15m_val = data.y_test_tensor[i, 0].item()
+            X_seq = data.X_test_tensor[i : i + 1].to(device, non_blocking=True)
+            y_15m_val = data.y_test_tensor[i, 0].to(device, non_blocking=True).item()
 
             error_state_test = torch.tensor([test_error_history], dtype=X_seq.dtype, device=device)
             (mu_t, _), _, _ = best_model(X_seq, error_state=error_state_test)
@@ -597,8 +601,8 @@ def run_pure_training(cfg, run_paths, data, device):
         # ⭐️ TEST PHASE 2: TRUE EVALUATION
         # -----------------------------------------------------------
         for i in range(warmup_steps_test, len(data.X_test_tensor)):
-            X_seq = data.X_test_tensor[i : i + 1]
-            y_row_t = data.y_test_tensor[i]   # shape (3,)
+            X_seq = data.X_test_tensor[i : i + 1].to(device, non_blocking=True)
+            y_row_t = data.y_test_tensor[i].to(device, non_blocking=True)   # shape (3,)
             y_15m_t = y_row_t[0:1]
             y_1h_t  = y_row_t[1:2]
             y_4h_t  = y_row_t[2:3]
@@ -645,9 +649,9 @@ def run_pure_training(cfg, run_paths, data, device):
         test_loss = _avg_metric(total_test_loss, total_test_count)
 
         # Get binary targets for all three horizons
-        target_binary_15m = (data.y_test_tensor[warmup_steps_test:, 0] > 0.5).float()
-        target_binary_1h = (data.y_test_tensor[warmup_steps_test:, 1] > 0.5).float()
-        target_binary_4h = (data.y_test_tensor[warmup_steps_test:, 2] > 0.5).float()
+        target_binary_15m = (data.y_test_tensor[warmup_steps_test:, 0] > 0.5).float().to(device)
+        target_binary_1h = (data.y_test_tensor[warmup_steps_test:, 1] > 0.5).float().to(device)
+        target_binary_4h = (data.y_test_tensor[warmup_steps_test:, 2] > 0.5).float().to(device)
 
         # Helper function to compute accuracy metrics for a given horizon
         def compute_horizon_metrics(mu, sig, target_binary, horizon_name):

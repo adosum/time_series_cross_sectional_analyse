@@ -172,12 +172,13 @@ def prepare_data(
     X_val_3d, y_val_aligned = create_sequences(XX_val_scaled, y_val_raw, seq_len=seq_len)
     X_test_3d, y_test_aligned = create_sequences(XX_test_scaled, y_test_raw, seq_len=seq_len)
 
-    X_train_tensor = torch.tensor(X_train_3d, dtype=torch.float32).to(device)
-    y_train_tensor = torch.tensor(y_train_aligned, dtype=torch.float32).to(device)
-    X_val_tensor = torch.tensor(X_val_3d, dtype=torch.float32).to(device)
-    y_val_tensor = torch.tensor(y_val_aligned, dtype=torch.float32).to(device)
-    X_test_tensor = torch.tensor(X_test_3d, dtype=torch.float32).to(device)
-    y_test_tensor = torch.tensor(y_test_aligned, dtype=torch.float32).to(device)
+    # Keep dataset tensors on CPU so DataLoader workers never touch CUDA.
+    X_train_tensor = torch.tensor(X_train_3d, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train_aligned, dtype=torch.float32)
+    X_val_tensor = torch.tensor(X_val_3d, dtype=torch.float32)
+    y_val_tensor = torch.tensor(y_val_aligned, dtype=torch.float32)
+    X_test_tensor = torch.tensor(X_test_3d, dtype=torch.float32)
+    y_test_tensor = torch.tensor(y_test_aligned, dtype=torch.float32)
 
     batch_size = train_cfg["batch_size"]
 
@@ -187,17 +188,24 @@ def prepare_data(
 
     stage1_shuffle = bool(train_cfg.get("stage1_shuffle", False))
 
+    num_workers = int(train_cfg.get("num_workers", 8))
+    pin_memory = (device.type == "cuda")
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = int(train_cfg.get("prefetch_factor", 4))
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=stage1_shuffle,
         drop_last=True,  # Drop last batch if it's smaller than batch_size
-        num_workers=8,
-        pin_memory=True,
-        prefetch_factor=4,
+        **loader_kwargs,
     )
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True, prefetch_factor=4)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True, prefetch_factor=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, **loader_kwargs)
 
     print(f"Batches per Epoch: {len(train_loader)}")
     print(f"Stage 1 train shuffle: {stage1_shuffle}")

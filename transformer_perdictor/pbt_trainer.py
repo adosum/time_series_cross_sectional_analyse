@@ -130,6 +130,8 @@ def run_pbt_training(cfg, run_paths, data, device):
             epoch_pbar = tqdm(range(1, pbt_stage1_ep + 1), desc="S1:Batch", unit="ep", leave=False)
             for _ in epoch_pbar:
                 for batch_X, batch_y in train_batches:
+                    batch_X = batch_X.to(device, non_blocking=True)
+                    batch_y = batch_y.to(device, non_blocking=True)
                     batch_size_current = batch_X.shape[0]
                     train_error_histories = [
                         generate_random_error_history(error_history_len)
@@ -205,8 +207,8 @@ def run_pbt_training(cfg, run_paths, data, device):
                             (stage2_start + b * chunk_len + t) % total_train_samples
                             for b in range(B)
                         ]
-                        X_seq = data.X_train_tensor[indices]
-                        y_seq = data.y_train_tensor[indices]
+                        X_seq = data.X_train_tensor[indices].to(device, non_blocking=True)
+                        y_seq = data.y_train_tensor[indices].to(device, non_blocking=True)
 
                         X_aug = augment_financial_data(
                             X_seq,
@@ -281,8 +283,8 @@ def run_pbt_training(cfg, run_paths, data, device):
 
                 for t in range(val_chunk_len):
                     indices = [b * val_chunk_len + t for b in range(B_val)]
-                    X_seq = data.X_val_tensor[indices]
-                    y_seq = data.y_val_tensor[indices]
+                    X_seq = data.X_val_tensor[indices].to(device, non_blocking=True)
+                    y_seq = data.y_val_tensor[indices].to(device, non_blocking=True)
 
                     val_abs, val_direction, val_vol, val_trend, conf_logits = agent.ema_model(
                         X_seq, error_state=val_error_histories
@@ -433,8 +435,8 @@ def run_pbt_training(cfg, run_paths, data, device):
 
         # Sequential test pass preserves true temporal error-history continuity.
         for i in range(len(data.X_test_tensor)):
-            X_seq = data.X_test_tensor[i : i + 1]
-            y_seq = data.y_test_tensor[i : i + 1]
+            X_seq = data.X_test_tensor[i : i + 1].to(device, non_blocking=True)
+            y_seq = data.y_test_tensor[i : i + 1].to(device, non_blocking=True)
 
             error_state_test = torch.tensor([test_error_history], dtype=X_seq.dtype, device=device)
             test_abs, test_direction, test_vol, test_trend, _ = ultimate_model(
@@ -479,7 +481,7 @@ def run_pbt_training(cfg, run_paths, data, device):
             torch.relu(test_abs_predictions), test_direction_prob, test_vol_predictions
         )
         binary_predictions = (test_direction_prob >= 0.5).float()
-        target_binary = (data.y_test_tensor > 0.5).float()
+        target_binary = (data.y_test_tensor > 0.5).float().to(device)
 
         correct = (binary_predictions == target_binary).sum().item()
         accuracy = correct / len(data.y_test_tensor)
