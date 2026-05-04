@@ -188,7 +188,23 @@ def prepare_data(
 
     stage1_shuffle = bool(train_cfg.get("stage1_shuffle", False))
 
-    num_workers = int(train_cfg.get("num_workers", 8))
+    requested_workers = train_cfg.get("num_workers")
+    if requested_workers is None:
+        cpu_count = os.cpu_count() or 1
+        num_workers = min(8, max(1, cpu_count // 2))
+    else:
+        num_workers = int(requested_workers)
+    num_workers = max(0, num_workers)
+
+    pin_memory = (device.type == "cuda")
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        prefetch_factor = int(train_cfg.get("prefetch_factor", 4))
+        loader_kwargs["prefetch_factor"] = max(1, min(prefetch_factor, 8))
+        loader_kwargs["persistent_workers"] = bool(train_cfg.get("persistent_workers", False))
     pin_memory = (device.type == "cuda")
     loader_kwargs = {
         "num_workers": num_workers,

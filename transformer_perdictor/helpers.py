@@ -6,6 +6,45 @@ import numpy as np
 import torch
 
 
+def get_state_dict_for_save(model: torch.nn.Module) -> dict:
+    """Return a checkpoint-safe state_dict, unwrapping torch.compile when needed."""
+    if hasattr(model, "_orig_mod"):
+        return model._orig_mod.state_dict()
+    return model.state_dict()
+
+
+def normalize_state_dict_keys(state_dict: dict) -> dict:
+    """Normalize known wrapper prefixes (e.g., torch.compile) for robust loading."""
+    normalized = state_dict
+    prefixes = ("_orig_mod.", "module.")
+    for prefix in prefixes:
+        if all(isinstance(k, str) and k.startswith(prefix) for k in normalized.keys()):
+            normalized = {k[len(prefix):]: v for k, v in normalized.items()}
+    return normalized
+
+
+def load_state_dict_compat(
+    model: torch.nn.Module,
+    state_dict: dict,
+    strict: bool = True,
+) -> None:
+    """Load checkpoints that may come from wrapped/compiled modules."""
+    normalized = normalize_state_dict_keys(state_dict)
+
+    # torch.compile wraps the real module in OptimizedModule; load into the
+    # underlying original model to avoid key namespace mismatches.
+    target_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+
+    try:
+        target_model.load_state_dict(normalized, strict=strict)
+        return
+    except RuntimeError:
+        # Fallback for legacy checkpoints that may already match target namespace.
+        pass
+
+    target_model.load_state_dict(state_dict, strict=strict)
+
+
 def apply_reproducibility(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)

@@ -80,7 +80,7 @@ model:
   patch_stride: 2
 
 training:
-  batch_size: 64
+  batch_size: 256
   epochs: 500
   lr: 0.0008754413881554826
   weight_decay: 0.0004458877337310131

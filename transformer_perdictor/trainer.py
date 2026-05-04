@@ -15,6 +15,8 @@ from .config import model_output_path
 from .helpers import (
     augment_financial_data,
     compute_trend_strength,
+    get_state_dict_for_save,
+    load_state_dict_compat,
     prepare_error_states,
     update_error_history,
 )
@@ -232,7 +234,7 @@ def run_pure_training(cfg, run_paths, data, device):
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    torch.save(model.state_dict(), model_save_path)
+                    torch.save(get_state_dict_for_save(model), model_save_path)
                     _log(
                         f"Saved best pure model at epoch {epoch}, val_loss={best_val_loss:.4f}"
                     )
@@ -243,7 +245,7 @@ def run_pure_training(cfg, run_paths, data, device):
 
     # Load best model from Stage 1
     _log(f"Loading best model from Stage 1: {model_save_path}")
-    model.load_state_dict(torch.load(model_save_path, map_location=device))
+    load_state_dict_compat(model, torch.load(model_save_path, map_location=device))
     _log(f"Loaded checkpoint with validation loss: {best_val_loss:.4f}")
 
     _log("Configuring Layer-Wise Learning Rates...")
@@ -514,7 +516,7 @@ def run_pure_training(cfg, run_paths, data, device):
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    torch.save(model.state_dict(), model_save_path)
+                    torch.save(get_state_dict_for_save(model), model_save_path)
                     _log(
                         f"Saved best pure model at epoch {stage1_epochs + epoch}, "
                         f"val_loss={best_val_loss:.4f}"
@@ -561,7 +563,7 @@ def run_pure_training(cfg, run_paths, data, device):
         patch_len=model_cfg.get("patch_len", 4),
         patch_stride=model_cfg.get("patch_stride", 2),
     ).to(device)
-    best_model.load_state_dict(torch.load(model_save_path, map_location=device))
+    load_state_dict_compat(best_model, torch.load(model_save_path, map_location=device))
     best_model.eval()
 
     with torch.no_grad():
